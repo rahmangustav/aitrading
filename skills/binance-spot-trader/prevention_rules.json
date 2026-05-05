@@ -1,0 +1,10 @@
+[
+  {
+    "id": "R6",
+    "condition": "general",
+    "rule": "Review all pairs with >40% loss rate monthly; consider pair rotation",
+    "action": "monthly_review",
+    "params": {},
+    "severity": "low"
+  }
+]

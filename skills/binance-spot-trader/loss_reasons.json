@@ -1,0 +1,80 @@
+{
+  "updated": "2026-05-05T07:13:13.905130+00:00",
+  "total_losses": 5,
+  "summary": {
+    "sl_too_tight": 3,
+    "unknown": 2
+  },
+  "classifications": {
+    "SUIUSDT_2026-04-28T03:18:26.343078+00:00": {
+      "symbol": "SUIUSDT",
+      "entry": 0.9286,
+      "exit": 0.9255,
+      "pnl_pct": -0.33,
+      "entry_ts": "2026-04-28T03:18:26.343078+00:00",
+      "exit_ts": "2026-04-28T06:43:49.487906+00:00",
+      "reasons": [
+        "sl_too_tight"
+      ],
+      "btc_change_24h": 0
+    },
+    "NEARUSDT_2026-04-28T03:56:35.425661+00:00": {
+      "symbol": "NEARUSDT",
+      "entry": 1.36,
+      "exit": 1.329,
+      "pnl_pct": -2.28,
+      "entry_ts": "2026-04-28T03:56:35.425661+00:00",
+      "exit_ts": "2026-04-29T15:15:04.828145+00:00",
+      "reasons": [
+        "unknown"
+      ],
+      "btc_change_24h": 0
+    },
+    "NEARUSDT_2026-05-01T00:00:12.434815+00:00": {
+      "symbol": "NEARUSDT",
+      "entry": 1.301,
+      "exit": 1.286,
+      "pnl_pct": -1.15,
+      "entry_ts": "2026-05-01T00:00:12.434815+00:00",
+      "exit_ts": "2026-05-04T22:15:12.930895+00:00",
+      "reasons": [
+        "sl_too_tight"
+      ],
+      "btc_change_24h": 0
+    },
+    "SOLUSDT_2026-04-29T16:00:14.718956+00:00": {
+      "symbol": "SOLUSDT",
+      "entry": 83.2,
+      "exit": 82.89,
+      "pnl_pct": -0.37,
+      "entry_ts": "2026-04-29T16:00:14.718956+00:00",
+      "exit_ts": "2026-04-30T02:44:55.826544+00:00",
+      "reasons": [
+        "sl_too_tight"
+      ],
+      "btc_change_24h": 0
+    },
+    "ETHUSDT_2026-04-29T16:15:08.666192+00:00": {
+      "symbol": "ETHUSDT",
+      "entry": 2276.69,
+      "exit": 2223.27,
+      "pnl_pct": -2.35,
+      "entry_ts": "2026-04-29T16:15:08.666192+00:00",
+      "exit_ts": "2026-04-29T18:45:05.478065+00:00",
+      "reasons": [
+        "unknown"
+      ],
+      "btc_change_24h": 0
+    }
+  },
+  "prevention_rules": [
+    {
+      "id": "R6",
+      "condition": "general",
+      "rule": "Review all pairs with >40% loss rate monthly; consider pair rotation",
+      "action": "monthly_review",
+      "params": {},
+      "severity": "low"
+    }
+  ]
+}
