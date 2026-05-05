@@ -1,0 +1,74 @@
+{
+  "BTCUSDT": {
+    "momentum": {
+      "total_trades": 61,
+      "wins": 18,
+      "losses": 43,
+      "win_rate": 29.5,
+      "total_pnl_pct": 3.38,
+      "avg_win": 1.92,
+      "avg_loss": -0.73,
+      "max_drawdown_pct": 0,
+      "profit_factor": 0.92
+    },
+    "mean_reversion": {
+      "total_trades": 51,
+      "wins": 24,
+      "losses": 27,
+      "win_rate": 47.1,
+      "total_pnl_pct": -10.74,
+      "avg_win": 1.15,
+      "avg_loss": -1.42,
+      "max_drawdown_pct": 0,
+      "profit_factor": 0.61
+    }
+  },
+  "ETHUSDT": {
+    "momentum": {
+      "total_trades": 64,
+      "wins": 22,
+      "losses": 42,
+      "win_rate": 34.4,
+      "total_pnl_pct": 16.68,
+      "avg_win": 2.84,
+      "avg_loss": -1.09,
+      "max_drawdown_pct": 0,
+      "profit_factor": 1.2
+    },
+    "mean_reversion": {
+      "total_trades": 53,
+      "wins": 23,
+      "losses": 30,
+      "win_rate": 43.4,
+      "total_pnl_pct": -43.35,
+      "avg_win": 1.19,
+      "avg_loss": -2.36,
+      "max_drawdown_pct": 0,
+      "profit_factor": 0.33
+    }
+  },
+  "XRPUSDT": {
+    "momentum": {
+      "total_trades": 62,
+      "wins": 22,
+      "losses": 40,
+      "win_rate": 35.5,
+      "total_pnl_pct": 1.97,
+      "avg_win": 2.36,
+      "avg_loss": -1.25,
+      "max_drawdown_pct": 0,
+      "profit_factor": 0.92
+    },
+    "mean_reversion": {
+      "total_trades": 62,
+      "wins": 35,
+      "losses": 27,
+      "win_rate": 56.5,
+      "total_pnl_pct": -0.69,
+      "avg_win": 1.52,
+      "avg_loss": -1.99,
+      "max_drawdown_pct": 0,
+      "profit_factor": 0.87
+    }
+  }
+}

@@ -1,0 +1,26 @@
+# === Secrets (NEVER COMMIT) ===
+.env
+*.env
+.env.*
+credentials*
+*secret*
+*SECRET*
+
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === Trading Data (optional — besar) ===
+# trades.jsonl
+# state.json
+
+# === IDE ===
+.vscode/
+.idea/

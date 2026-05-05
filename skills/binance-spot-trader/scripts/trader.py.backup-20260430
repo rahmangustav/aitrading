@@ -1,0 +1,911 @@
+#!/usr/bin/env python3
+"""Binance Spot Trader — LLM-enhanced autonomous trading bot.
+Moovon Fund edition: momentum + mean reversion, DeepSeek-powered,
+4-layer scoring: TA + LLM + News + Regime, TP/SL enforcement, Telegram alerts."""
+import os, sys, json, time, logging, hmac, hashlib
+from pathlib import Path
+
+# Add learning engine to path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / ".learnings" / "trading"))
+try:
+    from scoring import combined_score
+except ImportError:
+    combined_score = None  # graceful fallback
+from datetime import datetime, timezone, date
+from urllib.parse import urlencode
+from dotenv import load_dotenv
+import httpx
+
+load_dotenv()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("trader")
+
+# ── Config ──────────────────────────────────────────────────
+API_KEY = os.environ["BINANCE_API_KEY"]
+SECRET_KEY = os.environ["BINANCE_SECRET_KEY"]
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek")
+LLM_MODEL = os.getenv("LLM_MODEL", "deepseek-chat")
+LLM_VETO = float(os.getenv("LLM_VETO_THRESHOLD", "0.30"))
+PAIRS = os.getenv("PAIRS", "BTCUSDT").split(",")
+STRATEGY = os.getenv("STRATEGY", "momentum")
+TRADE_SIZE_PCT = float(os.getenv("TRADE_SIZE_PCT", "5"))
+MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))
+TP_PCT = float(os.getenv("TAKE_PROFIT_PCT", "5"))
+SL_PCT = float(os.getenv("STOP_LOSS_PCT", "3"))
+USE_LLM = os.getenv("USE_LLM", "true").lower() == "true"
+DCA_AMOUNT = float(os.getenv("DCA_AMOUNT_USDT", "50"))
+MIN_VOL_24H = float(os.getenv("MIN_DAILY_VOL_USDT", "5000000"))
+MAX_DAILY_LOSS_PCT = float(os.getenv("MAX_DAILY_LOSS_PCT", "5"))
+MIN_RANGE_WIDTH_PCT = float(os.getenv("MIN_RANGE_WIDTH_PCT", "3"))
+REENTRY_COOLDOWN_MIN = int(os.getenv("REENTRY_COOLDOWN_MIN", "60"))
+MIN_REENTRY_DISCOUNT_PCT = float(os.getenv("MIN_REENTRY_DISCOUNT_PCT", "1.5"))
+MIN_TRADE_USDT = float(os.getenv("MIN_TRADE_USDT", "5"))
+TG_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TG_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6146842621")
+
+BASE = "https://api.binance.com"
+TRADES_LOG = Path("trades.jsonl")
+STATE_FILE = Path("state.json")
+ENTRY_QUALITY_FILE = Path("entry_quality.json")
+
+
+def get_pair_config(symbol):
+    """Return (tp_pct, sl_pct, trade_size_pct, reentry_cooldown_min, reentry_discount_pct, min_range_width)
+    for a symbol, with per-symbol overrides via env."""
+    tp = float(os.getenv(f"{symbol}_TP_PCT", str(TP_PCT)))
+    sl = float(os.getenv(f"{symbol}_SL_PCT", str(SL_PCT)))
+    sz = float(os.getenv(f"{symbol}_TRADE_SIZE_PCT", str(TRADE_SIZE_PCT)))
+    cooldown = int(os.getenv(f"{symbol}_REENTRY_COOLDOWN", str(REENTRY_COOLDOWN_MIN)))
+    discount = float(os.getenv(f"{symbol}_MIN_REENTRY_DISCOUNT", str(MIN_REENTRY_DISCOUNT_PCT)))
+    rw = float(os.getenv(f"{symbol}_MIN_RANGE_WIDTH_PCT", str(MIN_RANGE_WIDTH_PCT)))
+    return tp, sl, sz, cooldown, discount, rw
+
+# ── Helpers ─────────────────────────────────────────────────
+def sign(params: dict) -> dict:
+    params["timestamp"] = int(time.time() * 1000)
+    query = urlencode(params)
+    params["signature"] = hmac.new(SECRET_KEY.encode(), query.encode(), hashlib.sha256).hexdigest()
+    return params
+
+def api_get(path, params=None):
+    with httpx.Client(timeout=15) as c:
+        if params and "signature" in params:
+            r = c.get(f"{BASE}{path}", params=params, headers={"X-MBX-APIKEY": API_KEY})
+        else:
+            r = c.get(f"{BASE}{path}", params=params or {})
+        return r.json()
+
+def api_post(path, params):
+    with httpx.Client(timeout=15) as c:
+        r = c.post(f"{BASE}{path}", params=sign(params), headers={"X-MBX-APIKEY": API_KEY})
+        return r.json()
+
+def get_klines(symbol, interval="1h", limit=50):
+    data = api_get("/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
+    return [{"t": k[0], "o": float(k[1]), "h": float(k[2]), "l": float(k[3]), "c": float(k[4]), "v": float(k[5])} for k in data]
+
+def ema(prices, period):
+    k = 2 / (period + 1)
+    e = prices[0]
+    for p in prices[1:]:
+        e = p * k + e * (1 - k)
+    return e
+
+def rsi(prices, period=14):
+    deltas = [prices[i+1] - prices[i] for i in range(len(prices)-1)]
+    gains = [d if d > 0 else 0 for d in deltas[-period:]]
+    losses = [-d if d < 0 else 0 for d in deltas[-period:]]
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_loss == 0: return 100
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def bollinger(prices, period=20, std_mult=2):
+    sma = sum(prices[-period:]) / period
+    variance = sum((p - sma) ** 2 for p in prices[-period:]) / period
+    std = variance ** 0.5
+    return sma - std_mult * std, sma, sma + std_mult * std
+
+def llm_sentiment(symbol, klines):
+    if not USE_LLM or not LLM_API_KEY: return 0.5
+    prices = [k["c"] for k in klines[-10:]]
+    vol = [k["v"] for k in klines[-10:]]
+    prompt = f"""Rate market sentiment for {symbol} (0.0=very bearish, 1.0=very bullish):
+Last 10 closes: {[round(p,2) for p in prices]}
+Volume trend: {'increasing' if vol[-1] > sum(vol[:-1])/len(vol[:-1]) else 'decreasing'}
+Current RSI: {rsi(prices):.0f}
+Reply ONLY a number."""
+    with httpx.Client(timeout=30) as c:
+        if LLM_PROVIDER in ("deepseek", "openai", "openai-compatible"):
+            base_url = os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1")
+            resp = c.post(f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {LLM_API_KEY}", "Content-Type": "application/json"},
+                json={"model": LLM_MODEL, "max_tokens": 10, "temperature": 0,
+                      "messages": [{"role": "user", "content": prompt}]})
+            text = resp.json()["choices"][0]["message"]["content"].strip()
+        else:
+            resp = c.post("https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": LLM_API_KEY, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
+                json={"model": LLM_MODEL or "claude-3-5-haiku-20241022", "max_tokens": 20,
+                       "messages": [{"role": "user", "content": prompt}]})
+            text = resp.json().get("content", [{}])[0].get("text", "0.5").strip()
+        try: return float(text.split()[0].strip(".,"))
+        except: return 0.5
+
+def get_balance(asset="USDT"):
+    info = api_get("/api/v3/account", sign({}))
+    for b in info.get("balances", []):
+        if b["asset"] == asset:
+            return float(b["free"])
+    return 0
+
+def _get_price(asset):
+    """Quick USDT price lookup for dust filtering."""
+    try:
+        ticker = api_get("/api/v3/ticker/price", {"symbol": f"{asset}USDT"})
+        return float(ticker["price"])
+    except:
+        return 0
+
+def get_all_positions():
+    info = api_get("/api/v3/account", sign({}))
+    positions = {}
+    for b in info.get("balances", []):
+        free = float(b["free"])
+        locked = float(b["locked"])
+        qty = free + locked
+        if qty <= 0 or b["asset"] == "USDT":
+            continue
+        # Skip dust: positions worth less than $1
+        if qty <= 0 or (_get_price(b["asset"]) * qty) < 1.0:
+            log.info(f"🧹 Skipping dust: {qty:.6f} {b['asset']}")
+            continue
+        positions[b["asset"]] = {"free": free, "locked": locked}
+    return positions
+
+def count_positions():
+    return len(get_all_positions())
+
+# ── Exchange Info (step size cache) ──────────────────────────
+_exchange_info = None
+
+def _load_exchange_info():
+    global _exchange_info
+    if _exchange_info is None:
+        try:
+            _exchange_info = {}
+            resp = api_get("/api/v3/exchangeInfo", {})
+            for s in resp.get("symbols", []):
+                filters = {}
+                for f in s.get("filters", []):
+                    if f["filterType"] == "LOT_SIZE":
+                        filters["step"] = float(f["stepSize"])
+                        filters["min"] = float(f["minQty"])
+                    elif f["filterType"] == "PRICE_FILTER":
+                        filters["tick"] = float(f["tickSize"])
+                _exchange_info[s["symbol"]] = filters
+            log.info(f"Exchange info loaded: {len(_exchange_info)} symbols")
+        except Exception as e:
+            log.warning(f"Exchange info load failed: {e}, using fallback")
+            _exchange_info = {}
+    return _exchange_info
+
+def round_step(symbol, qty):
+    """Round quantity to valid step size for this symbol."""
+    info = _load_exchange_info()
+    filters = info.get(symbol, {})
+    step = filters.get("step", 0.000001)
+    if step <= 0:
+        step = 0.000001
+    precision = max(0, len(str(step).rstrip('0').split('.')[-1]) if '.' in str(step) else 0)
+    rounded = round((qty // step) * step, precision)
+    return max(filters.get("min", step), rounded)
+
+# ── Live Learning: signal recording ─────────────────────────
+SIGNAL_DB_PATH = Path(__file__).resolve().parent.parent / "signal_db.json"
+
+def record_signal_db(symbol, signal_type, price, info, sentiment=None):
+    """Record signal for accuracy tracking."""
+    try:
+        db = {}
+        if SIGNAL_DB_PATH.exists():
+            db = json.loads(open(SIGNAL_DB_PATH).read())
+        db.setdefault("signals", []).append({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "pair": symbol,
+            "signal": signal_type,
+            "price": price,
+            "confidence": "B{}/S{}".format(info.get("buy_score",0), info.get("sell_score",0)) if info else "N/A",
+            "llm_sentiment": sentiment,
+            "status": "open" if signal_type == "BUY" else "pending",
+            "verified": False,
+        })
+        # Keep only last 500 signals
+        if len(db["signals"]) > 500:
+            db["signals"] = db["signals"][-500:]
+        with open(SIGNAL_DB_PATH, "w") as f:
+            json.dump(db, f, indent=2, default=str)
+    except Exception as e:
+        log.debug(f"Signal DB write skipped: {e}")
+
+def place_order(symbol, side, quantity):
+    qty = round_step(symbol, quantity)
+    params = {"symbol": symbol, "side": side, "type": "MARKET", "quantity": str(qty)}
+    result = api_post("/api/v3/order", params)
+    status = result.get("status", "UNKNOWN")
+    fill_price = float(result.get("fills", [{}])[0].get("price", 0)) if result.get("fills") else 0
+    log.info(f"ORDER {side}: {symbol} qty={qty} @ ${fill_price:.4f} -> {status}")
+    with open(TRADES_LOG, "a") as f:
+        f.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "symbol": symbol,
+            "side": side, "qty": qty, "result": status, "price": fill_price}) + "\n")
+    return {"status": status, "price": fill_price, "symbol": symbol, "side": side, "qty": qty}
+
+def get_24h_volume(symbol):
+    try:
+        ticker = api_get("/api/v3/ticker/24hr", {"symbol": symbol})
+        return float(ticker.get("quoteVolume", 0))
+    except:
+        return 0
+
+# ── Telegram Alerts ─────────────────────────────────────────
+def tg_alert(msg: str):
+    """Send alert to Telegram. Must set TELEGRAM_BOT_TOKEN in .env."""
+    if not TG_BOT_TOKEN:
+        return  # silent skip — no bot configured
+    try:
+        with httpx.Client(timeout=10) as c:
+            resp = c.post(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", json={
+                "chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "HTML"
+            })
+            if resp.status_code == 200:
+                log.info(f"📨 Alert sent: {msg[:60]}...")
+            else:
+                log.warning(f"📨 Alert failed: {resp.status_code} {resp.text[:100]}")
+    except Exception as e:
+        log.warning(f"Telegram alert failed: {e}")
+
+def tg_trade_alert(symbol, side, qty, price, reason=""):
+    emoji = "🟢" if side == "BUY" else "🔴"
+    pnl_str = ""
+    if side == "SELL" and reason:
+        pnl_str = f"\n📊 Reason: {reason}"
+    msg = f"{emoji} <b>{side}</b> {symbol}\nQty: {qty:.6f}\nPrice: ${price:.4f}{pnl_str}"
+    tg_alert(msg)
+
+# ── TP/SL Engine ────────────────────────────────────────────
+def load_state():
+    if STATE_FILE.exists():
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    return {"day_pnl": 0, "start_balance_snapshot": None, "date": str(date.today()), "entries": {}}
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+def record_entry(symbol, entry_price, qty=None):
+    """Record a new position batch. Supports multi-batch positions."""
+    state = load_state()
+    entry = state.setdefault("entries", {}).setdefault(symbol, {"batches": []})
+    entry["batches"].append({
+        "qty": qty if qty else 0,
+        "price": entry_price,
+        "ts": datetime.now(timezone.utc).isoformat()
+    })
+    # Update trail_sl per entry if exists
+    if "trail_sl" in entry:
+        entry["trail_sl"] = None  # reset on new batch
+    save_state(state)
+    avg = get_entry(symbol)
+    log.info(f"📊 Batch added: {symbol} qty={qty} @ ${entry_price:.4f} (avg: ${avg:.4f})")
+
+def infer_entry_from_trades(asset):
+    """Infer multi-batch entries from trade history (FIFO)."""
+    pair = f"{asset}USDT"
+    buys = []
+    sells = []
+    try:
+        if TRADES_LOG.exists():
+            for line in open(TRADES_LOG):
+                t = json.loads(line.strip())
+                if t.get("result") != "FILLED" or t.get("price", 0) <= 0:
+                    continue
+                if t.get("symbol") != pair:
+                    continue
+                if t["side"] == "BUY":
+                    buys.append(t)
+                elif t["side"] == "SELL":
+                    sells.append(t)
+        if not buys:
+            return None
+        # FIFO: process sells to consume buys
+        sell_qty = sum(s["qty"] for s in sells)
+        remaining = []
+        for b in buys:
+            qty = b["qty"]
+            while qty > 0 and sell_qty > 0:
+                consumed = min(qty, sell_qty)
+                qty -= consumed
+                sell_qty -= consumed
+            if qty > 0:
+                remaining.append({"qty": qty, "price": b["price"]})
+        if not remaining:
+            return None
+        # Rebuild entries from remaining batches
+        state = load_state()
+        state.setdefault("entries", {})[asset] = {"batches": remaining}
+        save_state(state)
+        avg = sum(b["qty"]*b["price"] for b in remaining) / sum(b["qty"] for b in remaining)
+        return round(avg, 4)
+    except Exception:
+        return None
+
+def remove_entry(symbol, sell_qty=None, sell_price=None):
+    """Remove position batches FIFO. If sell_qty given, only consume that amount.
+    Also records last_sell info for re-entry cooldown checks."""
+    state = load_state()
+    entry = state.get("entries", {}).get(symbol)
+    if not entry:
+        return
+    if sell_qty is None:
+        del state["entries"][symbol]
+    else:
+        batches = entry.get("batches", [])
+        remaining_qty = sell_qty
+        while remaining_qty > 0 and batches:
+            b = batches[0]
+            if b["qty"] <= remaining_qty:
+                remaining_qty -= b["qty"]
+                batches.pop(0)
+            else:
+                b["qty"] -= remaining_qty
+                remaining_qty = 0
+        if not batches:
+            del state["entries"][symbol]
+    # Record last_sell for re-entry cooldown
+    if sell_price is not None:
+        state.setdefault("last_sell", {})[symbol] = {
+            "price": sell_price,
+            "ts": datetime.now(timezone.utc).isoformat()
+        }
+        log.info(f"📝 last_sell recorded: {symbol} @ ${sell_price:.4f}")
+    save_state(state)
+
+def get_entry(symbol):
+    """Get weighted average entry price for a symbol."""
+    state = load_state()
+    entry = state.get("entries", {}).get(symbol)
+    if not entry:
+        return None
+    batches = entry.get("batches", [])
+    if not batches:
+        return None
+    total_qty = sum(b["qty"] for b in batches)
+    if total_qty <= 0:
+        return None
+    return round(sum(b["qty"] * b["price"] for b in batches) / total_qty, 4)
+
+def get_total_qty(symbol):
+    """Get total quantity held across all batches."""
+    state = load_state()
+    entry = state.get("entries", {}).get(symbol)
+    if not entry:
+        return 0
+    return sum(b["qty"] for b in entry.get("batches", []))
+
+def check_tp_sl():
+    """Check all open positions for TP/SL with trailing stop.
+    Trail: PnL>2% -> SL to entry. PnL>3% -> lock +1.5%."""
+    state = load_state()
+    entries = state.get("entries", {})
+    triggers = []
+
+    for symbol in list(entries.keys()):
+        entry_price = get_entry(symbol)
+        if not entry_price:
+            continue
+        data = entries[symbol]
+        try:
+            ticker = api_get("/api/v3/ticker/price", {"symbol": f"{symbol}USDT"})
+            current = float(ticker["price"])
+            pnl_pct = ((current - entry_price) / entry_price) * 100
+
+            # Trailing stop
+            trail_sl = data.get("trail_sl", None)
+            use_default_sl = True
+
+            if pnl_pct > 3.0:
+                new_trail = entry_price * 1.015
+                old = data.get("trail_sl")
+                if old is None or new_trail > old:
+                    data["trail_sl"] = new_trail
+                    log.info(f"Lock Trail: {symbol} +{pnl_pct:.1f}% -> SL ${new_trail:.4f}")
+                    save_state(state)
+                use_default_sl = False
+            elif pnl_pct > 2.0:
+                new_trail = entry_price
+                old = data.get("trail_sl")
+                if old is None or new_trail > old:
+                    data["trail_sl"] = new_trail
+                    log.info(f"Breakeven: {symbol} +{pnl_pct:.1f}% -> SL at entry")
+                    save_state(state)
+                use_default_sl = False
+
+            # Check trailing SL trigger
+            if trail_sl is not None and current <= trail_sl:
+                triggers.append((f"{symbol}USDT", "SELL",
+                    f"Trail SL {((current-entry_price)/entry_price*100):+.2f}%"))
+                log.info(f"TRAIL SL: {symbol} @ ${current:.4f}")
+                state_tr = load_state()
+                state_tr.setdefault("last_sell", {})[symbol] = {"price": current, "ts": datetime.now(timezone.utc).isoformat()}
+                save_state(state_tr)
+                tg_alert(f"<b>TRAILING STOP</b> {symbol}\nEntry: ${entry_price:.4f}\nNow: ${current:.4f}\nPnL: {pnl_pct:+.2f}%")
+                continue
+
+            pair_tp, pair_sl, _, _, _, _ = get_pair_config(f"{symbol}USDT")
+            # Regular TP
+            if pnl_pct >= pair_tp:
+                triggers.append((f"{symbol}USDT", "SELL", f"TP +{pnl_pct:+.2f}%"))
+                log.info(f"TP HIT: {symbol} {pnl_pct:.2f}%")
+                state_tp = load_state()
+                state_tp.setdefault("last_sell", {})[symbol] = {"price": current, "ts": datetime.now(timezone.utc).isoformat()}
+                save_state(state_tp)
+                tg_alert(f"<b>TAKE PROFIT</b> {symbol}\nEntry: ${entry_price:.4f}\nNow: ${current:.4f}\nPnL: {pnl_pct:+.2f}%")
+
+            # Regular SL (only if no trailing)
+            elif pnl_pct <= -pair_sl and use_default_sl:
+                triggers.append((f"{symbol}USDT", "SELL", f"SL {pnl_pct:+.2f}%"))
+                log.info(f"SL HIT: {symbol} {pnl_pct:.2f}%")
+                state_sl = load_state()
+                state_sl.setdefault("last_sell", {})[symbol] = {"price": current, "ts": datetime.now(timezone.utc).isoformat()}
+                save_state(state_sl)
+                tg_alert(f"<b>STOP LOSS</b> {symbol}\nEntry: ${entry_price:.4f}\nNow: ${current:.4f}\nPnL: {pnl_pct:+.2f}%")
+
+        except Exception as e:
+            log.warning(f"TP/SL check failed for {symbol}: {e}")
+
+    return triggers
+
+def check_daily_loss():
+    """Return True if daily loss limit exceeded."""
+    state = load_state()
+    today = str(date.today())
+
+    if state.get("date") != today or not state.get("start_balance_snapshot"):
+        info = api_get("/api/v3/account", sign({}))
+        total_usdt = estimate_total_value(info)
+        state["day_pnl"] = 0
+        state["start_balance_snapshot"] = total_usdt
+        state["date"] = today
+        # Preserve entries across day resets
+        if "entries" not in state:
+            state["entries"] = {}
+        save_state(state)
+        log.info(f"Set daily baseline: ${total_usdt:.2f}")
+
+    start = state.get("start_balance_snapshot", 0)
+    info = api_get("/api/v3/account", sign({}))
+    current = estimate_total_value(info)
+    pnl_pct = ((current - start) / start) * 100
+    state["day_pnl"] = pnl_pct
+    save_state(state)
+    log.info(f"Daily P&L: {pnl_pct:+.2f}% | ${current:.2f} vs ${start:.2f}")
+
+    if pnl_pct <= -MAX_DAILY_LOSS_PCT:
+        log.warning(f"⚠️  DAILY LOSS LIMIT HIT: {pnl_pct:+.2f}% (limit: -{MAX_DAILY_LOSS_PCT}%)")
+        tg_alert(f"⛔ <b>DAILY LOSS LIMIT!</b>\nPnL: {pnl_pct:+.2f}%\nLimit: -{MAX_DAILY_LOSS_PCT}%\nTrading halted for today.")
+        return True
+    return False
+
+def estimate_total_value(account_info):
+    total = 0.0
+    for b in account_info.get("balances", []):
+        free = float(b["free"])
+        locked = float(b["locked"])
+        amount = free + locked
+        if b["asset"] == "USDT":
+            total += amount
+        elif amount > 0:
+            try:
+                price_info = api_get("/api/v3/ticker/price", {"symbol": f"{b['asset']}USDT"})
+                total += amount * float(price_info["price"])
+            except:
+                pass
+    return total
+
+def volume_filter(symbol):
+    vol = get_24h_volume(symbol)
+    if vol < MIN_VOL_24H:
+        log.info(f"  ⏭ {symbol} skipped: 24h vol ${vol:,.0f} < ${MIN_VOL_24H:,.0f}")
+        return False
+    return True
+
+# ── Range Trading Engine ────────────────────────────────────
+PIVOT_TOLERANCE = 0.02  # 2% tolerance for support/resistance zones
+
+def find_support_resistance(klines, min_touches=2):
+    """Find support and resistance levels. Returns (support, resistance, width_pct, sl_touches, res_touches)."""
+    highs = [k["h"] for k in klines[-30:]]
+    lows = [k["l"] for k in klines[-30:]]
+    resistance = max(highs[-20:])
+    support = min(lows[-20:])
+    width_pct = ((resistance - support) / support) * 100
+    near_high = sum(1 for h in highs if h >= resistance * (1 - PIVOT_TOLERANCE))
+    near_low = sum(1 for l in lows if l <= support * (1 + PIVOT_TOLERANCE))
+    return support, resistance, width_pct, near_low, near_high
+
+def range_confluence_score(klines, mode="buy"):
+    """Score 0-100 for entry quality. >60 = good entry."""
+    prices = [k["c"] for k in klines]
+    current = prices[-1]
+    r = rsi(prices)
+    lower, mid, upper = bollinger(prices)
+    support, resistance, width_pct, sl_touches, res_touches = find_support_resistance(klines)
+    score = 0
+
+    if mode == "buy":
+        if r < 25: score += 30
+        elif r < 35: score += 20
+        elif r < 45: score += 10
+        if current <= lower * 1.03: score += 25
+        elif current <= lower * 1.06: score += 15
+        if current <= support * 1.02: score += 20
+        elif current <= support * 1.04: score += 10
+        if sl_touches >= 2: score += 15
+        if width_pct >= 3: score += 10
+    else:  # sell
+        if r > 75: score += 30
+        elif r > 65: score += 20
+        elif r > 55: score += 10
+        if current >= upper * 0.97: score += 25
+        elif current >= upper * 0.94: score += 15
+        if current >= resistance * 0.98: score += 20
+        elif current >= resistance * 0.96: score += 10
+        if res_touches >= 2: score += 15
+        if width_pct >= 3: score += 10
+
+    return score, {"support": support, "resistance": resistance, "width_pct": width_pct,
+                   "mid": (support + resistance) / 2, "rsi": r, "bb_lower": lower, "bb_upper": upper,
+                   "sl_touches": sl_touches, "res_touches": res_touches}
+
+# ── Strategy Signals ────────────────────────────────────────
+def momentum_signal(klines):
+    prices = [k["c"] for k in klines]
+    ema20 = ema(prices, 20)
+    current = prices[-1]
+    avg_vol = sum(k["v"] for k in klines[-20:]) / 20
+    vol_spike = klines[-1]["v"] > avg_vol * 1.5
+    if current > ema20 and vol_spike: return "BUY", {}
+    if current < ema20: return "SELL", {}
+    return "HOLD", {}
+
+def mean_reversion_signal(klines, symbol=None):
+    """Range-optimized: uses confluence scoring + range width filter."""
+    _, _, width_pct, _, _ = find_support_resistance(klines)
+    min_width = MIN_RANGE_WIDTH_PCT
+    if symbol:
+        _, _, _, _, _, min_width = get_pair_config(symbol)
+    if width_pct < min_width:
+        return "HOLD", {"reason": f"range too narrow ({width_pct:.1f}% < {min_width}%)"}
+
+    buy_score, info = range_confluence_score(klines, "buy")
+    sell_score, _ = range_confluence_score(klines, "sell")
+    info["buy_score"] = buy_score
+    info["sell_score"] = sell_score
+
+    if buy_score >= 60:
+        return "BUY", info
+    elif sell_score >= 60:
+        return "SELL", info
+    return "HOLD", info
+
+def detect_market_regime(klines):
+    prices = [k["c"] for k in klines[-30:]]
+    total_range = max(prices) - min(prices)
+    if total_range == 0: return "momentum"
+    directionality = (prices[-1] - prices[0]) / (total_range + 0.0001)
+    if abs(directionality) > 0.55:
+        return "momentum"
+    return "mean_reversion"
+
+def get_signal(klines, strategy, symbol=None):
+    """Get trade signal + extra info dict."""
+    if strategy == "momentum":
+        return momentum_signal(klines)
+    elif strategy == "mean_reversion":
+        return mean_reversion_signal(klines, symbol)
+    elif strategy == "auto":
+        regime = detect_market_regime(klines)
+        log.info(f"  Regime: {regime}")
+        return momentum_signal(klines) if regime == "momentum" else mean_reversion_signal(klines, symbol)
+    elif strategy == "dca":
+        return "BUY", {}
+    return "HOLD", {}
+
+def format_pnl(entry_price, current_price):
+    pnl = ((current_price - entry_price) / entry_price) * 100
+    return f"{pnl:+.2f}%"
+
+# ── Main Logic ──────────────────────────────────────────────
+def run():
+    log.info(f"Strategy: {STRATEGY} | Pairs: {PAIRS} | LLM: {USE_LLM} | Veto<{LLM_VETO} | MaxPos={MAX_POSITIONS} | TP={TP_PCT}% SL={SL_PCT}%")
+
+    # ── Risk gate: daily loss ──
+    if check_daily_loss():
+        log.error("⛔ Daily loss limit reached. Stopping for today.")
+        return
+
+    # ── TP/SL: check existing positions FIRST ──
+    tp_sl_triggers = check_tp_sl()
+    usdt_before = get_balance("USDT")
+    for symbol, action, reason in tp_sl_triggers:
+        base = symbol.replace("USDT", "")
+        held = get_balance(base)
+        if held > 0:
+            result = place_order(symbol, action, held)
+            if result["status"] == "FILLED":
+                remove_entry(base, held, result["price"])
+                tg_trade_alert(symbol, action, held, result["price"], reason)
+
+    # ── Balance & positions ──
+    usdt_balance = get_balance("USDT")
+    current_positions = count_positions()
+    log.info(f"USDT: ${usdt_balance:.2f} | Positions: {current_positions}/{MAX_POSITIONS}")
+
+    if usdt_balance < 10 and current_positions == 0:
+        log.error("Insufficient balance, no positions. Nothing to do.")
+        return
+
+    # ── Re-sync entries from actual positions ──
+    state = load_state()
+    actual_positions = get_all_positions()
+    entries = state.get("entries", {})
+    # Clean up entries for positions that no longer exist
+    for symbol in list(entries.keys()):
+        if symbol not in actual_positions:
+            log.info(f"🧹 Cleaned stale entry: {symbol}")
+            remove_entry(symbol)
+    # If position exists but no entry record, infer from trade history
+    for asset in actual_positions:
+        if asset not in entries:
+            inferred = infer_entry_from_trades(asset)
+            if inferred:
+                record_entry(asset, inferred, 0)
+                log.info(f"🔍 Inferred entry for {asset} from trade history: ${inferred:.4f}")
+            else:
+                log.info(f"⚠️  Position exists but cannot infer entry: {asset}")
+
+    # ── Process each pair ──
+    for symbol in PAIRS:
+        try:
+            if not volume_filter(symbol):
+                continue
+
+            klines = get_klines(symbol, "1h", 50)
+            if not klines or len(klines) < 30:
+                continue
+
+            signal, info = get_signal(klines, STRATEGY, symbol)
+            current_price = klines[-1]["c"]
+            base = symbol.replace("USDT", "")
+
+            # Show PnL + confluence info if holding
+            parts = []
+            entry_price = get_entry(base)
+            if entry_price:
+                parts.append(f"PnL: {format_pnl(entry_price, current_price)}")
+            if info:
+                w = info.get("width_pct", 0)
+                bs = info.get("buy_score", 0)
+                ss = info.get("sell_score", 0)
+                if w > 0: parts.append(f"range={w:.1f}%")
+                if bs > 0 or ss > 0: parts.append(f"B{bs}/S{ss}")
+            extra = " | " + " | ".join(parts) if parts else ""
+
+            log.info(f"{symbol}: ${current_price:.2f} signal={signal}{extra}")
+
+            # Record signal for live learning
+            if signal in ("BUY", "SELL"):
+                record_signal_db(symbol, signal, current_price, info)
+
+            if signal == "BUY":
+                current_positions = count_positions()
+                if current_positions >= MAX_POSITIONS:
+                    log.info(f"  ⛔ Max positions ({MAX_POSITIONS}) reached")
+                    continue
+
+                # ── Per-symbol risk limits ──
+                existing_entry = get_entry(base)
+                if existing_entry:
+                    log.info(f"  ⛔ Already holding {base} — no repeat buy")
+                    continue
+
+                # ── Re-entry cooldown & price discount ──
+                _, _, pair_sz, pair_cooldown, pair_discount, _ = get_pair_config(symbol)
+                state = load_state()
+                last_sell = state.get("last_sell", {}).get(base)
+                if last_sell:
+                    try:
+                        sell_ts = datetime.fromisoformat(last_sell["ts"])
+                        minutes_since = (datetime.now(timezone.utc) - sell_ts).total_seconds() / 60
+                        if minutes_since < pair_cooldown:
+                            log.info(f"  ⏳ Re-entry cooldown: {minutes_since:.0f}m < {pair_cooldown}m since last sell @ ${last_sell['price']:.4f}")
+                            continue
+                        min_entry = last_sell["price"] * (1 - pair_discount / 100)
+                        if current_price > min_entry:
+                            log.info(f"  📉 Re-entry discount: ${current_price:.5f} > ${min_entry:.5f} (need -{pair_discount}% from sell ${last_sell['price']:.4f})")
+                            continue
+                        log.info(f"  ✅ Re-entry OK: {minutes_since:.0f}m cooldown, ${current_price:.5f} ≤ ${min_entry:.5f}")
+                    except Exception as e:
+                        log.warning(f"  ⚠️ Re-entry check error: {e}")
+                # Trade size calc
+                if STRATEGY == "dca":
+                    trade_usdt = DCA_AMOUNT
+                else:
+                    trade_usdt = usdt_balance * (pair_sz / 100)
+
+                # Max 25% of portfolio per symbol
+                total_value = usdt_balance + sum(
+                    _get_price(a) * (d["free"] + d["locked"])
+                    for a, d in get_all_positions().items()
+                )
+                if trade_usdt > total_value * 0.25:
+                    log.info(f"  ⛔ Trade ${trade_usdt:.2f} > 25% of portfolio (${total_value:.2f})")
+                    continue
+
+                if USE_LLM:
+                    sentiment = llm_sentiment(symbol, klines)
+                    # Update signal DB with sentiment
+                    try:
+                        if SIGNAL_DB_PATH.exists():
+                            db = json.loads(open(SIGNAL_DB_PATH).read())
+                            for s in reversed(db.get("signals", [])):
+                                if s["pair"] == symbol and s.get("llm_sentiment") is None:
+                                    s["llm_sentiment"] = sentiment
+                                    break
+                            with open(SIGNAL_DB_PATH, "w") as f:
+                                json.dump(db, f, indent=2, default=str)
+                    except:
+                        pass
+
+                    # ── 4-Layer Combined Scoring ──
+                    if combined_score is not None:
+                        result = combined_score(sentiment)
+                        passed = result["passed"]
+                        combined = result["combined"]
+                        threshold = result["threshold"]
+                        
+                        # Apply entry quality modifier from historical data
+                        quality_bonus = 0
+                        try:
+                            if ENTRY_QUALITY_FILE.exists():
+                                eq = json.loads(open(ENTRY_QUALITY_FILE).read())
+                                quality_bonus = eq.get("pair_modifiers", {}).get(base, {}).get("confidence_bonus", 0)
+                        except:
+                            pass
+                        
+                        effective_score = combined + quality_bonus
+                        effective_passed = effective_score >= threshold
+                        
+                        if quality_bonus != 0:
+                            log.info(f"  🧠 Score: {result['reason']} | Quality {quality_bonus:+.2f} → effective {effective_score:.3f} vs {threshold:.2f}")
+                        else:
+                            log.info(f"  🧠 Score: {result['reason']}")
+                        
+                        if not effective_passed:
+                            reason = f"combined {effective_score:.3f} < {threshold:.2f}" + (f" (quality {quality_bonus:+.2f})" if quality_bonus != 0 else "")
+                            log.info(f"  🛑 VETO — {reason}")
+                            continue
+                    else:
+                        # Fallback to old simple veto
+                        log.info(f"  LLM sentiment: {sentiment:.2f} (veto<{LLM_VETO})")
+                        if sentiment < LLM_VETO:
+                            log.info(f"  🛑 LLM VETO — bearish")
+                            continue
+
+                qty = trade_usdt / current_price
+                if trade_usdt >= MIN_TRADE_USDT and trade_usdt <= usdt_balance:
+                    result = place_order(symbol, "BUY", qty)
+                    if result["status"] == "FILLED":
+                        record_entry(base, result["price"], qty)
+                        tg_trade_alert(symbol, "BUY", qty, result["price"])
+                        usdt_balance -= trade_usdt
+                elif trade_usdt > usdt_balance:
+                    log.info(f"  Skip: trade ${trade_usdt:.2f} > balance ${usdt_balance:.2f}")
+                else:
+                    log.info(f"  Skip: trade ${trade_usdt:.2f} below \${MIN_TRADE_USDT:.0f} minimum")
+
+            elif signal == "SELL":
+                # Don't double-sell if TP/SL already triggered this cycle
+                if base not in get_all_positions():
+                    log.info(f"  No {base} position to sell")
+                    continue
+
+                # Guard: don't sell without entry tracking
+                entry_px = get_entry(base)
+                if not entry_px:
+                    entry_px = infer_entry_from_trades(base)
+                    if entry_px:
+                        record_entry(base, entry_px, 0)
+                        log.info(f"🔍 Inferred entry for {base}: ${entry_px:.4f}")
+                    else:
+                        log.info(f"⚠️  Cannot sell {base}: no entry record — skipping")
+                        continue
+
+                held = get_balance(base)
+                value = held * current_price
+                pnl_pct = ((current_price - entry_px) / entry_px) * 100
+                entry_age_min = 60  # default old
+                if entry_px:
+                    entry_data = state.get("entries", {}).get(base, {})
+                    if entry_data.get("entry_ts"):
+                        try:
+                            et = datetime.fromisoformat(entry_data["entry_ts"])
+                            entry_age_min = (datetime.now(timezone.utc) - et).total_seconds() / 60
+                        except:
+                            pass
+
+                # ── Rule 1: In profit → TAKE IT ──
+                if pnl_pct > 0:
+                    log.info(f"  🎯 SELL in profit: {pnl_pct:+.2f}% — taking it (entry ${entry_px:.4f} → now ${current_price:.4f})")
+                    result = place_order(symbol, "SELL", held)
+                    if result["status"] == "FILLED":
+                        pnl_reason = f"Signal SELL, booked: {pnl_pct:+.2f}%"
+                        remove_entry(base, held, result["price"])
+                        tg_trade_alert(symbol, "SELL", held, result["price"], pnl_reason)
+                        usdt_balance += value
+                    continue
+
+                # ── Rule 2: Loss + minimum hold → protect ──
+                if entry_age_min < 30:
+                    log.info(f"  ⏳ Holding {base}: {pnl_pct:+.2f}% | age={entry_age_min:.0f}min < 30min — no panic sell")
+                    continue
+
+                # ── Rule 3: Loss + exit gate (combined scoring) ──
+                if USE_LLM and combined_score is not None:
+                    sentiment = llm_sentiment(symbol, klines)
+                    result = combined_score(sentiment)
+                    combined_s = result["combined"]
+                    # Apply entry quality modifier (reverse: good pair = hold longer)
+                    quality_bonus_s = 0
+                    try:
+                        if ENTRY_QUALITY_FILE.exists():
+                            eq = json.loads(open(ENTRY_QUALITY_FILE).read())
+                            quality_bonus_s = eq.get("pair_modifiers", {}).get(base, {}).get("confidence_bonus", 0)
+                    except:
+                        pass
+                    effective_sell_score = combined_s + quality_bonus_s
+                    log.info(f"  🔴 SELL gate: {result['reason']} | Quality {quality_bonus_s:+.2f} → effective {effective_sell_score:.3f}")
+                    # Higher threshold for selling: don't sell on weak signal
+                    if effective_sell_score < 0.45:
+                        log.info(f"  ⏳ Holding {base}: score {result['combined']:.3f} < 0.45 — weak signal")
+                        continue
+
+                # ── Execute sell ──
+                if value > 10:
+                    result = place_order(symbol, "SELL", held)
+                    if result["status"] == "FILLED":
+                        pnl_reason = f"Signal SELL, PnL: {pnl_pct:+.2f}%"
+                        remove_entry(base, held, result["price"])
+                        tg_trade_alert(symbol, "SELL", held, result["price"], pnl_reason)
+                        usdt_balance += value
+                elif held > 0:
+                    log.info(f"  Dust: {held} {base} (${value:.2f})")
+                else:
+                    log.info(f"  No {base} position to sell")
+
+        except Exception as e:
+            log.error(f"{symbol} error: {e}")
+            tg_alert(f"⚠️ <b>Error</b> {symbol}: {str(e)[:200]}")
+
+    # ── Summary ──
+    final_usdt = get_balance("USDT")
+    final_positions = count_positions()
+    state = load_state()
+    day_pnl = state.get("day_pnl", 0)
+    log.info(f"=== Done | USDT: ${final_usdt:.2f} | Pos: {final_positions} | Day: {day_pnl:+.2f}% ===")
+
+if __name__ == "__main__":
+    run()
