@@ -1,26 +1,46 @@
-# === Secrets (NEVER COMMIT) ===
-.env
-*.env
-.env.*
-credentials*
-*secret*
-*SECRET*
-
-# === Python ===
+# Python
 __pycache__/
-*.pyc
-*.pyo
-.venv/
-venv/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# === OS ===
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# OS
 .DS_Store
 Thumbs.db
 
-# === Trading Data (optional — besar) ===
-# trades.jsonl
-# state.json
-
-# === IDE ===
-.vscode/
-.idea/
+# Environment variables
+.env
+.env.local
+*.env.*

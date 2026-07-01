@@ -367,7 +367,7 @@ def main() -> None:
         choices=[
             "status", "balance", "start_strategy", "stop_strategy",
             "list_strategies", "history", "backtest", "sentiment",
-            "monitor", "emergency_stop",
+            "monitor", "emergency_stop", "performance", "export",
         ],
         help="Operation mode",
     )
@@ -380,6 +380,7 @@ def main() -> None:
     parser.add_argument("--end", type=str, help="Backtest end date (YYYY-MM-DD)")
     parser.add_argument("--symbol", type=str, help="Symbol for sentiment analysis")
     parser.add_argument("--action", type=str, help="Monitor action (start/stop/status)")
+    parser.add_argument("--format", type=str, default="json", help="Export format (json/csv)")
 
     args = parser.parse_args()
 
