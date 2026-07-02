@@ -52,14 +52,21 @@ def _calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
     avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
 
-    rs = avg_gain / avg_loss.replace(0, float("inf"))
+    rs = avg_gain / avg_loss
     rsi = 100.0 - (100.0 / (1.0 + rs))
+    # avg_loss == 0 means pure gains: RSI is 100 (not 0). Flat = neutral 50.
+    rsi = rsi.where(avg_loss != 0, 100.0)
+    rsi = rsi.where((avg_loss != 0) | (avg_gain != 0), 50.0)
     return rsi
 
 
 class TrendFollowingStrategy(BaseStrategy):
     name = "trend_following"
     display_name = "Trend Following"
+    _persist_attrs = (
+        "position", "position_amount", "entry_price",
+        "highest_since_entry", "last_signal",
+    )
 
     def __init__(self, strategy_id: str, params: Dict[str, Any], exchange_manager: Any, risk_manager: Any) -> None:
         super().__init__(strategy_id, params, exchange_manager, risk_manager)
@@ -74,6 +81,7 @@ class TrendFollowingStrategy(BaseStrategy):
         self.exchange: str = params.get("exchange", "")
 
         self.position: Optional[str] = None
+        self.position_amount: float = 0.0
         self.entry_price: float = 0.0
         self.highest_since_entry: float = 0.0
         self.last_signal: Optional[str] = None
@@ -136,14 +144,17 @@ class TrendFollowingStrategy(BaseStrategy):
         bearish_cross = prev_ema_short >= prev_ema_long and ema_short < ema_long
 
         signals: List[Dict[str, Any]] = []
-        amount = self.order_amount_usdt / current_price if current_price > 0 else 0
+        buy_amount = round(self.order_amount_usdt / current_price, 8) if current_price > 0 else 0
+        # Exits must sell what was actually bought, not a fresh amount
+        # derived from the current price.
+        sell_amount = round(self.position_amount, 8) if self.position_amount > 0 else buy_amount
 
         if bullish_cross and rsi < self.rsi_overbought:
             if self.position != "long":
                 signals.append({
                     "symbol": self.symbol,
                     "side": "buy",
-                    "amount": round(amount, 8),
+                    "amount": buy_amount,
                     "price": None,
                     "order_type": "market",
                     "exchange": self.exchange,
@@ -174,7 +185,7 @@ class TrendFollowingStrategy(BaseStrategy):
                 signals.append({
                     "symbol": self.symbol,
                     "side": "sell",
-                    "amount": round(amount, 8),
+                    "amount": sell_amount,
                     "price": None,
                     "order_type": "market",
                     "exchange": self.exchange,
@@ -191,22 +202,22 @@ class TrendFollowingStrategy(BaseStrategy):
         if self.position == "long" and current_price > self.highest_since_entry:
             self.highest_since_entry = current_price
 
-        if self.position == "long":
+        if self.position == "long" and self.entry_price > 0:
             if self.risk_manager.check_stop_loss(self.entry_price, current_price):
                 signals.append({
                     "symbol": self.symbol,
                     "side": "sell",
-                    "amount": round(amount, 8),
+                    "amount": sell_amount,
                     "price": None,
                     "order_type": "market",
                     "exchange": self.exchange,
                     "reason": f"Stop-loss triggered: entry={self.entry_price:.2f}, current={current_price:.2f}",
                 })
-            elif self.risk_manager.check_trailing_stop(self.highest_since_entry, current_price):
+            elif self.highest_since_entry > 0 and self.risk_manager.check_trailing_stop(self.highest_since_entry, current_price):
                 signals.append({
                     "symbol": self.symbol,
                     "side": "sell",
-                    "amount": round(amount, 8),
+                    "amount": sell_amount,
                     "price": None,
                     "order_type": "market",
                     "exchange": self.exchange,
@@ -219,7 +230,7 @@ class TrendFollowingStrategy(BaseStrategy):
                 signals.append({
                     "symbol": self.symbol,
                     "side": "sell",
-                    "amount": round(amount, 8),
+                    "amount": sell_amount,
                     "price": None,
                     "order_type": "market",
                     "exchange": self.exchange,
@@ -231,18 +242,29 @@ class TrendFollowingStrategy(BaseStrategy):
     def on_order_filled(self, order: Dict[str, Any]) -> None:
         """Update position tracking after an order fills."""
         side = order.get("side", "")
-        price = order.get("price", 0)
+        filled = order.get("filled") or order.get("amount") or 0
+        # Market orders often come back without "price"; fall back to the
+        # average fill price or derive it from cost/filled.
+        price = order.get("average") or order.get("price")
+        if not price:
+            cost = order.get("cost")
+            if cost and filled:
+                price = cost / filled
+        price = price or 0
 
         if side == "buy":
             self.position = "long"
-            self.entry_price = price
-            self.highest_since_entry = price
+            self.position_amount += filled
+            if price > 0:
+                self.entry_price = price
+                self.highest_since_entry = price
             self.stats["trades_executed"] += 1
         elif side == "sell":
-            if self.entry_price > 0:
+            if self.entry_price > 0 and price > 0:
                 pnl = ((price - self.entry_price) / self.entry_price) * 100
                 self.stats["total_pnl"] += pnl
             self.position = None
+            self.position_amount = 0.0
             self.entry_price = 0.0
             self.highest_since_entry = 0.0
             self.stats["trades_executed"] += 1

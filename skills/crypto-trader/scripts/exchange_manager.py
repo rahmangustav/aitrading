@@ -110,7 +110,9 @@ class ExchangeManager:
 
             exchange = exchange_class(exchange_opts)
 
-            use_sandbox = cfg.get("sandbox", self._demo)
+            # Demo mode always forces sandbox; the per-exchange config can
+            # only opt out of sandbox when CRYPTO_DEMO is explicitly false.
+            use_sandbox = self._demo or cfg.get("sandbox", True)
             if use_sandbox:
                 sandbox_urls = cfg.get("sandbox_urls")
                 if sandbox_urls:
@@ -128,7 +130,12 @@ class ExchangeManager:
                         exchange.set_sandbox_mode(True)
                         logger.info("Exchange %s: sandbox mode enabled via CCXT.", name)
                     except Exception:
-                        logger.warning("Exchange %s: sandbox mode not available, using live URLs.", name)
+                        logger.error(
+                            "Exchange %s: sandbox mode not available. Skipping "
+                            "exchange instead of falling back to live URLs.",
+                            name,
+                        )
+                        continue
 
             self._exchanges[name] = exchange
             logger.info("Exchange %s initialized (sandbox=%s).", name, use_sandbox)
@@ -407,6 +414,7 @@ class ExchangeManager:
 
         self._cache.invalidate(f"balance:{exchange_name}")
         self._cache.invalidate(f"open_orders:{exchange_name}:{symbol}")
+        self._cache.invalidate(f"open_orders:{exchange_name}:None")
 
         return {
             "id": order.get("id"),
@@ -433,6 +441,7 @@ class ExchangeManager:
             exchange.cancel_order, order_id, symbol,
         )
         self._cache.invalidate(f"open_orders:{exchange_name}:{symbol}")
+        self._cache.invalidate(f"open_orders:{exchange_name}:None")
         return {
             "id": result.get("id", order_id),
             "status": result.get("status", "canceled"),

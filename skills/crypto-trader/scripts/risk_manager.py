@@ -24,10 +24,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPTS_DIR.parent
 _CONFIG_DIR = _PROJECT_ROOT / "config"
 _DATA_DIR = _PROJECT_ROOT / "data"
-_STATE_PATH = Path(os.environ.get(
-    "CRYPTO_RISK_STATE_PATH",
-    str(Path.home() / ".openclaw" / ".crypto-trader-risk-state.json"),
-))
+_DEFAULT_STATE_PATH = Path.home() / ".openclaw" / ".crypto-trader-risk-state.json"
 
 
 class RiskLimitExceeded(Exception):
@@ -49,9 +46,14 @@ class RiskManager:
         self._stop_loss_cfg = self._config.get("stop_loss", {})
         self._take_profit_cfg = self._config.get("take_profit", {})
 
+        # Resolved per instance so CRYPTO_RISK_STATE_PATH set after import
+        # (e.g. by tests) is honored instead of the import-time value.
+        self._state_path = Path(os.environ.get(
+            "CRYPTO_RISK_STATE_PATH", str(_DEFAULT_STATE_PATH),
+        ))
         self._state = self._load_state()
         self._lock = threading.Lock()
-        self._killed = False
+        self._killed = self._state.get("killed", False)
 
     # ------------------------------------------------------------------
     # Config & State
@@ -67,9 +69,9 @@ class RiskManager:
             return yaml.safe_load(fh) or {}
 
     def _load_state(self) -> Dict[str, Any]:
-        if _STATE_PATH.exists():
+        if self._state_path.exists():
             try:
-                with open(_STATE_PATH, "r", encoding="utf-8") as fh:
+                with open(self._state_path, "r", encoding="utf-8") as fh:
                     return json.load(fh)
             except (json.JSONDecodeError, OSError):
                 logger.warning("Corrupt risk state file, resetting.")
@@ -89,8 +91,8 @@ class RiskManager:
         }
 
     def _save_state(self) -> None:
-        _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(_STATE_PATH, "w", encoding="utf-8") as fh:
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._state_path, "w", encoding="utf-8") as fh:
             json.dump(self._state, fh, indent=2, default=str)
 
     def _reset_daily_if_needed(self) -> None:
@@ -144,7 +146,15 @@ class RiskManager:
                     "Reset manually to resume."
                 )
 
-            estimated_cost = amount * (price or 0)
+            if not price or price <= 0:
+                raise RiskLimitExceeded(
+                    "unknown_order_cost",
+                    "Cannot validate an order without a price. Market orders "
+                    "must supply a reference price (e.g. last ticker price) "
+                    "so size limits can be enforced."
+                )
+
+            estimated_cost = amount * price
 
             max_order = self._get_limit(strategy, "max_order_size_eur")
             if max_order and estimated_cost > max_order:
@@ -246,7 +256,7 @@ class RiskManager:
         """Return True if stop-loss should trigger."""
         if not self._stop_loss_cfg.get("enabled", True):
             return False
-        threshold = custom_pct or self._stop_loss_cfg.get("default_pct", 5.0)
+        threshold = custom_pct if custom_pct is not None else self._stop_loss_cfg.get("default_pct", 5.0)
         loss_pct = ((entry_price - current_price) / entry_price) * 100
         return loss_pct >= threshold
 
@@ -259,7 +269,7 @@ class RiskManager:
         """Return True if trailing stop should trigger."""
         if not self._stop_loss_cfg.get("trailing_enabled", False):
             return False
-        threshold = custom_pct or self._stop_loss_cfg.get("trailing_pct", 3.0)
+        threshold = custom_pct if custom_pct is not None else self._stop_loss_cfg.get("trailing_pct", 3.0)
         drop_pct = ((highest_price - current_price) / highest_price) * 100
         return drop_pct >= threshold
 
@@ -272,7 +282,7 @@ class RiskManager:
         """Return True if take-profit should trigger."""
         if not self._take_profit_cfg.get("enabled", True):
             return False
-        threshold = custom_pct or self._take_profit_cfg.get("default_pct", 10.0)
+        threshold = custom_pct if custom_pct is not None else self._take_profit_cfg.get("default_pct", 10.0)
         profit_pct = ((current_price - entry_price) / entry_price) * 100
         return profit_pct >= threshold
 

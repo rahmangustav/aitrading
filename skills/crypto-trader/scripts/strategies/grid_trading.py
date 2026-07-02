@@ -35,6 +35,10 @@ logger = logging.getLogger("crypto-trader.strategy.grid")
 class GridTradingStrategy(BaseStrategy):
     name = "grid_trading"
     display_name = "Grid Trading"
+    _persist_attrs = (
+        "price_range", "grid_levels", "grid_spacing",
+        "active_orders", "_initialized",
+    )
 
     def __init__(self, strategy_id: str, params: Dict[str, Any], exchange_manager: Any, risk_manager: Any) -> None:
         super().__init__(strategy_id, params, exchange_manager, risk_manager)
@@ -177,10 +181,30 @@ class GridTradingStrategy(BaseStrategy):
 
         return signals
 
+    def on_order_placed(self, signal: Dict[str, Any], order: Dict[str, Any]) -> None:
+        """Track placed grid orders so levels are not re-ordered every cycle."""
+        level = signal.get("grid_level")
+        if level is None:
+            level = signal.get("price")
+        if level is None:
+            return
+        self.active_orders[f"{float(level):.2f}"] = {
+            "order_id": order.get("id"),
+            "side": signal.get("side"),
+        }
+
     def on_order_filled(self, order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Handle a filled order: place the counter-order one grid level away."""
-        price = order.get("price", 0)
+        price = order.get("average") or order.get("price") or 0
         side = order.get("side", "")
+
+        # Free the filled level so the grid can re-use it later.
+        if price:
+            self.active_orders.pop(f"{float(price):.2f}", None)
+        self.stats["trades_executed"] += 1
+
+        if not price:
+            return None
 
         if side == "buy":
             sell_price = round(price + self.grid_spacing, 2)

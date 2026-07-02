@@ -73,9 +73,9 @@ Use when the user asks: "How much BTC do I have?", "What's my balance?", "Show m
 ### 3. start_strategy -- Start a trading strategy
 
 ```bash
-python3 {baseDir}/scripts/main.py --mode start_strategy --strategy grid --params '{"symbol":"BTC/USDT","price_range":[90000,110000],"num_grids":10,"order_amount_usdt":10}'
+python3 {baseDir}/scripts/main.py --mode start_strategy --strategy grid_trading --params '{"symbol":"BTC/USDT","price_range":[90000,110000],"num_grids":10,"order_amount_usdt":10}'
 python3 {baseDir}/scripts/main.py --mode start_strategy --strategy dca --params '{"symbol":"ETH/USDT","interval":"daily","amount_per_buy_usdt":5}'
-python3 {baseDir}/scripts/main.py --mode start_strategy --strategy trend --params '{"symbol":"BTC/USDT","timeframe":"4h"}'
+python3 {baseDir}/scripts/main.py --mode start_strategy --strategy trend_following --params '{"symbol":"BTC/USDT","timeframe":"4h"}'
 ```
 
 Supported strategies:

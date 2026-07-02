@@ -6,10 +6,10 @@ Usage
 -----
   python main.py --mode status
   python main.py --mode balance --exchange binance
-  python main.py --mode start_strategy --strategy grid --params '{...}'
+  python main.py --mode start_strategy --strategy grid_trading --params '{...}'
   python main.py --mode stop_strategy --strategy-id <id>
   python main.py --mode list_strategies
-  python main.py --mode backtest --strategy grid --params '{...}' --start 2025-01-01 --end 2025-12-31
+  python main.py --mode backtest --strategy grid_trading --params '{...}' --start 2025-01-01 --end 2025-12-31
   python main.py --mode history --days 7
   python main.py --mode sentiment --symbol BTC
   python main.py --mode monitor --action start|status|stop
@@ -75,6 +75,7 @@ def _init_components() -> tuple:
     engine = StrategyEngine(exchange_mgr, risk_mgr)
 
     _register_strategies(engine)
+    engine.load_state()
 
     return exchange_mgr, risk_mgr, engine
 
@@ -299,7 +300,12 @@ def _run_sentiment(symbol: str) -> None:
 # Mode: monitor
 # ------------------------------------------------------------------
 
-def _run_monitor(action: str) -> None:
+def _run_monitor(
+    action: str,
+    exchange_mgr: ExchangeManager,
+    risk_mgr: RiskManager,
+    engine: StrategyEngine,
+) -> None:
     """Control the monitoring daemon."""
     try:
         from monitor_daemon import MonitorDaemon
@@ -313,6 +319,16 @@ def _run_monitor(action: str) -> None:
         result = daemon.stop()
     elif action == "status":
         result = daemon.get_status()
+    elif action == "run":
+        # Internal: executed by the child process spawned via `start`.
+        notifier = None
+        try:
+            from notifier import Notifier
+            notifier = Notifier()
+        except Exception as exc:
+            logger.warning("Notifier unavailable, running without alerts: %s", exc)
+        daemon.run_loop(exchange_mgr, risk_mgr, engine, notifier)
+        result = {"status": "ok", "message": "Monitor loop exited."}
     else:
         _error(f"Unknown monitor action: {action}. Use start, stop, or status.")
         return
@@ -367,7 +383,7 @@ def main() -> None:
         choices=[
             "status", "balance", "start_strategy", "stop_strategy",
             "list_strategies", "history", "backtest", "sentiment",
-            "monitor", "emergency_stop", "performance", "export",
+            "monitor", "emergency_stop",
         ],
         help="Operation mode",
     )
@@ -380,7 +396,6 @@ def main() -> None:
     parser.add_argument("--end", type=str, help="Backtest end date (YYYY-MM-DD)")
     parser.add_argument("--symbol", type=str, help="Symbol for sentiment analysis")
     parser.add_argument("--action", type=str, help="Monitor action (start/stop/status)")
-    parser.add_argument("--format", type=str, default="json", help="Export format (json/csv)")
 
     args = parser.parse_args()
 
@@ -425,7 +440,7 @@ def main() -> None:
     elif mode == "monitor":
         if not args.action:
             _error("--action is required for monitor mode (start/stop/status).")
-        _run_monitor(args.action)
+        _run_monitor(args.action, exchange_mgr, risk_mgr, engine)
 
     elif mode == "emergency_stop":
         _run_emergency_stop(exchange_mgr, risk_mgr, engine)

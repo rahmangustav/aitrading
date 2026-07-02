@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -23,6 +24,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _STATE_PATH = Path(os.environ.get(
     "CRYPTO_MONITOR_STATE_PATH",
     str(Path.home() / ".openclaw" / ".crypto-trader-monitor.json"),
+))
+_LOG_PATH = Path(os.environ.get(
+    "CRYPTO_MONITOR_LOG_PATH",
+    str(Path.home() / ".openclaw" / "crypto-trader-monitor.log"),
 ))
 _PID_PATH = Path(os.environ.get(
     "CRYPTO_MONITOR_PID_PATH",
@@ -42,6 +47,10 @@ class MonitorDaemon:
     def __init__(self) -> None:
         self._running = False
         self._state = self._load_state()
+        # order_id -> {strategy_id, exchange, symbol}; tracks orders placed by
+        # this daemon that have not filled yet, so fills can be dispatched to
+        # the owning strategy.
+        self._order_registry: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # State management
@@ -107,7 +116,7 @@ class MonitorDaemon:
     # ------------------------------------------------------------------
 
     def start(self) -> Dict[str, Any]:
-        """Start the monitoring daemon."""
+        """Start the monitoring daemon as a detached background process."""
         existing_pid = self._read_pid()
         if existing_pid and self._is_process_running(existing_pid):
             return {
@@ -116,16 +125,26 @@ class MonitorDaemon:
                 "message": "Monitor daemon is already running.",
             }
 
-        self._running = True
+        main_py = Path(__file__).resolve().parent / "main.py"
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_LOG_PATH, "a") as log_fh:
+            proc = subprocess.Popen(
+                [sys.executable, str(main_py), "--mode", "monitor", "--action", "run"],
+                stdout=log_fh,
+                stderr=log_fh,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+
         self._state["running"] = True
         self._state["started_at"] = datetime.now(timezone.utc).isoformat()
-        self._write_pid()
         self._save_state()
 
         return {
             "status": "started",
-            "pid": os.getpid(),
-            "message": "Monitor daemon started.",
+            "pid": proc.pid,
+            "log_file": str(_LOG_PATH),
+            "message": "Monitor daemon started in the background.",
         }
 
     def stop(self) -> Dict[str, Any]:
@@ -190,6 +209,9 @@ class MonitorDaemon:
         signal.signal(signal.SIGTERM, _signal_handler)
         signal.signal(signal.SIGINT, _signal_handler)
 
+        self._running = True
+        self._state["running"] = True
+        self._state["started_at"] = datetime.now(timezone.utc).isoformat()
         self._write_pid()
         logger.info("Monitor daemon started (PID %d).", os.getpid())
 
@@ -204,7 +226,9 @@ class MonitorDaemon:
 
             try:
                 if now - last_orders_check >= CHECK_ORDERS_INTERVAL:
-                    self._check_open_orders(exchange_manager, strategy_engine)
+                    self._check_open_orders(
+                        exchange_manager, strategy_engine, risk_manager, notifier,
+                    )
                     last_orders_check = now
 
                 if now - last_snapshot >= SNAPSHOT_INTERVAL:
@@ -247,35 +271,72 @@ class MonitorDaemon:
     # Monitoring tasks
     # ------------------------------------------------------------------
 
-    def _check_open_orders(self, exchange_manager: Any, strategy_engine: Any) -> None:
-        """Check status of all open orders across exchanges."""
-        for ex_name in exchange_manager.available_exchanges:
+    def _check_open_orders(
+        self,
+        exchange_manager: Any,
+        strategy_engine: Any,
+        risk_manager: Any,
+        notifier: Any,
+    ) -> None:
+        """Poll tracked orders and dispatch fill callbacks to their strategies."""
+        for order_id, meta in list(self._order_registry.items()):
             try:
-                open_orders = exchange_manager.get_open_orders(ex_name)
-                logger.debug("Exchange %s: %d open orders.", ex_name, len(open_orders))
+                order = exchange_manager.get_order(
+                    meta["exchange"], order_id, meta.get("symbol"),
+                )
             except Exception as exc:
-                logger.warning("Failed to check orders on %s: %s", ex_name, exc)
+                logger.warning("Failed to check order %s: %s", order_id, exc)
+                continue
+
+            status = order.get("status")
+            if status in ("closed", "filled"):
+                del self._order_registry[order_id]
+                strategy = strategy_engine.get_strategy_instance(meta["strategy_id"])
+                if strategy is None:
+                    continue
+                follow_up = strategy.on_order_filled(order)
+                while follow_up:
+                    follow_up.setdefault("strategy_id", meta["strategy_id"])
+                    follow_up.setdefault("strategy_name", strategy.name)
+                    follow_up = self._execute_signal(
+                        follow_up, strategy_engine, exchange_manager,
+                        risk_manager, notifier,
+                    )
+                strategy_engine.save_state()
+            elif status in ("canceled", "cancelled", "expired", "rejected"):
+                del self._order_registry[order_id]
+
+    @staticmethod
+    def _exchange_portfolio_value(exchange_manager: Any, ex_name: str) -> float:
+        """Value all assets on one exchange in USDT terms."""
+        total_value = 0.0
+        try:
+            balances = exchange_manager.get_balance(ex_name)
+        except Exception as exc:
+            logger.warning("Failed to get balance from %s: %s", ex_name, exc)
+            return 0.0
+
+        for asset, data in balances.items():
+            if not isinstance(data, dict):
+                continue
+            amount = data.get("total", 0) or 0
+            if asset in ("USDT", "USDC", "BUSD"):
+                total_value += amount
+            else:
+                try:
+                    ticker = exchange_manager.get_ticker(ex_name, f"{asset}/USDT")
+                    price = ticker.get("last", 0) or 0
+                    total_value += amount * price
+                except Exception:
+                    pass
+        return total_value
 
     def _update_portfolio_snapshot(self, exchange_manager: Any, risk_manager: Any) -> None:
         """Update portfolio value for risk tracking."""
-        total_value = 0.0
-        for ex_name in exchange_manager.available_exchanges:
-            try:
-                balances = exchange_manager.get_balance(ex_name)
-                for asset, data in balances.items():
-                    if isinstance(data, dict):
-                        if asset == "USDT":
-                            total_value += data.get("total", 0)
-                        else:
-                            try:
-                                ticker = exchange_manager.get_ticker(ex_name, f"{asset}/USDT")
-                                price = ticker.get("last", 0) or 0
-                                total_value += data.get("total", 0) * price
-                            except Exception:
-                                pass
-            except Exception as exc:
-                logger.warning("Failed to get balance from %s: %s", ex_name, exc)
-
+        total_value = sum(
+            self._exchange_portfolio_value(exchange_manager, ex_name)
+            for ex_name in exchange_manager.available_exchanges
+        )
         if total_value > 0:
             risk_manager.update_portfolio_value(total_value)
 
@@ -313,65 +374,118 @@ class MonitorDaemon:
         notifier: Any,
     ) -> None:
         """Run strategy evaluations and execute signals."""
-        signals = strategy_engine.evaluate_all()
+        # Pick up strategies started/stopped by other CLI processes.
+        strategy_engine.sync_from_disk()
 
-        for signal_data in signals:
-            strategy_name = signal_data.get("strategy_name", "unknown")
-            exchange = signal_data.get("exchange", "")
-            symbol = signal_data.get("symbol", "")
-            side = signal_data.get("side", "")
-            amount = signal_data.get("amount", 0)
-            price = signal_data.get("price")
+        signals = list(strategy_engine.evaluate_all())
 
-            try:
-                open_orders = exchange_manager.get_open_orders(exchange, symbol)
-                balances = exchange_manager.get_balance(exchange)
-                total_value = sum(
-                    v.get("total", 0) if isinstance(v, dict) else 0
-                    for v in balances.values()
-                )
+        # Follow-up signals (e.g. grid counter-orders) may be appended
+        # while iterating, so use an index loop.
+        i = 0
+        while i < len(signals):
+            follow_up = self._execute_signal(
+                signals[i], strategy_engine, exchange_manager, risk_manager, notifier,
+            )
+            if follow_up:
+                signals.append(follow_up)
+            i += 1
 
-                risk_manager.validate_order(
-                    strategy=strategy_name,
-                    exchange=exchange,
-                    symbol=symbol,
-                    side=side,
-                    amount=amount,
-                    price=price,
-                    portfolio_value_eur=total_value,
-                    open_order_count=len(open_orders),
-                )
+        # Persist updated runtime state (positions, stats, fill tracking).
+        strategy_engine.save_state()
 
-                order_type = signal_data.get("order_type", "market")
-                order = exchange_manager.place_order(
-                    exchange, symbol, side, amount, price, order_type,
-                )
+    def _execute_signal(
+        self,
+        signal_data: Dict[str, Any],
+        strategy_engine: Any,
+        exchange_manager: Any,
+        risk_manager: Any,
+        notifier: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Validate and place the order for one signal.
 
-                logger.info(
-                    "Signal executed: %s %s %s %.8f on %s (strategy: %s)",
-                    order_type, side, symbol, amount, exchange, strategy_name,
-                )
+        Returns a follow-up signal if the order filled immediately and the
+        strategy produced one, else None.
+        """
+        strategy_id = signal_data.get("strategy_id", "")
+        strategy_name = signal_data.get("strategy_name", "unknown")
+        exchange = signal_data.get("exchange", "")
+        symbol = signal_data.get("symbol", "")
+        side = signal_data.get("side", "")
+        amount = signal_data.get("amount", 0)
+        price = signal_data.get("price")
+        order_type = signal_data.get("order_type", "market")
 
-                if notifier:
-                    notifier.send_alert("trade_executed", {
-                        "strategy": strategy_name,
-                        "symbol": symbol,
-                        "side": side,
-                        "amount": amount,
-                        "price": price or order.get("price"),
-                        "exchange": exchange,
-                        "reason": signal_data.get("reason", ""),
-                    })
+        try:
+            # Market orders carry no price; fetch a reference price so the
+            # risk manager can enforce size limits.
+            ref_price = price
+            if not ref_price:
+                ticker = exchange_manager.get_ticker(exchange, symbol)
+                ref_price = ticker.get("last") or ticker.get("bid")
 
-            except Exception as exc:
-                logger.error(
-                    "Failed to execute signal for %s: %s", strategy_name, exc,
-                )
-                if notifier:
-                    notifier.send_alert("strategy_error", {
-                        "strategy": strategy_name,
-                        "error": str(exc),
-                    })
+            open_orders = exchange_manager.get_open_orders(exchange, symbol)
+            total_value = self._exchange_portfolio_value(exchange_manager, exchange)
+
+            risk_manager.validate_order(
+                strategy=strategy_name,
+                exchange=exchange,
+                symbol=symbol,
+                side=side,
+                amount=amount,
+                price=ref_price,
+                portfolio_value_eur=total_value,
+                open_order_count=len(open_orders),
+            )
+
+            order = exchange_manager.place_order(
+                exchange, symbol, side, amount, price, order_type,
+            )
+
+            logger.info(
+                "Signal executed: %s %s %s %.8f on %s (strategy: %s)",
+                order_type, side, symbol, amount, exchange, strategy_name,
+            )
+
+            if notifier:
+                notifier.send_alert("trade_executed", {
+                    "strategy": strategy_name,
+                    "symbol": symbol,
+                    "side": side,
+                    "amount": amount,
+                    "price": price or order.get("price") or ref_price,
+                    "exchange": exchange,
+                    "reason": signal_data.get("reason", ""),
+                })
+
+            strategy = strategy_engine.get_strategy_instance(strategy_id)
+            if strategy is None:
+                return None
+
+            strategy.on_order_placed(signal_data, order)
+
+            if order.get("status") in ("closed", "filled"):
+                follow_up = strategy.on_order_filled(order)
+                if follow_up:
+                    follow_up.setdefault("strategy_id", strategy_id)
+                    follow_up.setdefault("strategy_name", strategy_name)
+                    return follow_up
+            elif order.get("id"):
+                # Not filled yet: track it so _check_open_orders can
+                # dispatch the fill callback later.
+                self._order_registry[order["id"]] = {
+                    "strategy_id": strategy_id,
+                    "exchange": exchange,
+                    "symbol": symbol,
+                }
+
+        except Exception as exc:
+            logger.error("Failed to execute signal for %s: %s", strategy_name, exc)
+            if notifier:
+                notifier.send_alert("strategy_error", {
+                    "strategy": strategy_name,
+                    "error": str(exc),
+                })
+        return None
 
     def _check_sentiment(self, notifier: Any) -> None:
         """Run periodic sentiment checks."""

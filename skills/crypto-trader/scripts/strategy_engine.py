@@ -24,10 +24,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPTS_DIR.parent
 _CONFIG_DIR = _PROJECT_ROOT / "config"
 _DATA_DIR = _PROJECT_ROOT / "data"
-_STATE_PATH = Path(os.environ.get(
-    "CRYPTO_STRATEGY_STATE_PATH",
-    str(Path.home() / ".openclaw" / ".crypto-trader-strategies.json"),
-))
+_DEFAULT_STATE_PATH = Path.home() / ".openclaw" / ".crypto-trader-strategies.json"
 
 
 class BaseStrategy:
@@ -41,6 +38,9 @@ class BaseStrategy:
 
     name: str = "base"
     display_name: str = "Base Strategy"
+
+    # Attribute names persisted across process restarts (per subclass).
+    _persist_attrs: tuple = ()
 
     def __init__(
         self,
@@ -80,6 +80,29 @@ class BaseStrategy:
         """
         raise NotImplementedError
 
+    def on_order_placed(self, signal: Dict[str, Any], order: Dict[str, Any]) -> None:
+        """Called after an order for one of this strategy's signals is placed."""
+
+    def on_order_filled(self, order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Called when an order fills. May return a follow-up signal dict."""
+        return None
+
+    def get_state(self) -> Dict[str, Any]:
+        """Return strategy-specific mutable state to persist across restarts."""
+        state: Dict[str, Any] = {}
+        if hasattr(self, "exchange"):
+            state["exchange"] = getattr(self, "exchange")
+        for key in self._persist_attrs:
+            if hasattr(self, key):
+                state[key] = getattr(self, key)
+        return state
+
+    def restore_state(self, state: Dict[str, Any]) -> None:
+        """Restore state produced by get_state()."""
+        for key, value in state.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialize strategy state for persistence."""
         return {
@@ -104,6 +127,10 @@ class StrategyEngine:
         self._registry: Dict[str, Type[BaseStrategy]] = {}
         self._config = self._load_config()
         self._lock = threading.Lock()
+        # Resolved per instance so the env var set after import is honored.
+        self._state_path = Path(os.environ.get(
+            "CRYPTO_STRATEGY_STATE_PATH", str(_DEFAULT_STATE_PATH),
+        ))
 
     @staticmethod
     def _load_config() -> Dict[str, Any]:
@@ -240,6 +267,10 @@ class StrategyEngine:
         strategy = self._strategies.get(strategy_id)
         return strategy.to_dict() if strategy else None
 
+    def get_strategy_instance(self, strategy_id: str) -> Optional[BaseStrategy]:
+        """Return the live strategy object (for fill callbacks etc.)."""
+        return self._strategies.get(strategy_id)
+
     # ------------------------------------------------------------------
     # Persistence
     # ------------------------------------------------------------------
@@ -248,10 +279,87 @@ class StrategyEngine:
         """Save current strategy state to disk."""
         state = {
             "strategies": {
-                sid: s.to_dict() for sid, s in self._strategies.items()
+                sid: {**s.to_dict(), "state": s.get_state()}
+                for sid, s in self._strategies.items()
             },
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(_STATE_PATH, "w", encoding="utf-8") as fh:
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._state_path, "w", encoding="utf-8") as fh:
             json.dump(state, fh, indent=2, default=str)
+
+    def save_state(self) -> None:
+        """Public alias so callers (e.g. the monitor daemon) can persist."""
+        with self._lock:
+            self._save_state()
+
+    def _read_state_file(self) -> Optional[Dict[str, Any]]:
+        if not self._state_path.exists():
+            return None
+        try:
+            with open(self._state_path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (json.JSONDecodeError, OSError):
+            logger.warning("Corrupt strategy state file at %s, ignoring.", self._state_path)
+            return None
+
+    def load_state(self) -> int:
+        """Restore strategies persisted by previous processes.
+
+        Must be called after all strategy classes are registered. Existing
+        in-memory instances are kept as-is. Returns the number of strategies
+        restored.
+        """
+        data = self._read_state_file()
+        if not data:
+            return 0
+
+        restored = 0
+        with self._lock:
+            for sid, saved in data.get("strategies", {}).items():
+                if sid in self._strategies:
+                    continue
+                strategy_class = self._registry.get(saved.get("name", ""))
+                if strategy_class is None:
+                    logger.warning(
+                        "Cannot restore strategy %s: class '%s' not registered.",
+                        sid, saved.get("name"),
+                    )
+                    continue
+                strategy = strategy_class(
+                    strategy_id=sid,
+                    params=saved.get("params", {}),
+                    exchange_manager=self.exchange_manager,
+                    risk_manager=self.risk_manager,
+                )
+                strategy.active = saved.get("active", False)
+                strategy.created_at = saved.get("created_at", strategy.created_at)
+                strategy.last_run = saved.get("last_run")
+                strategy.stats = saved.get("stats", strategy.stats)
+                strategy.restore_state(saved.get("state", {}))
+                self._strategies[sid] = strategy
+                restored += 1
+
+        if restored:
+            logger.info("Restored %d strategy instance(s) from disk.", restored)
+        return restored
+
+    def sync_from_disk(self) -> None:
+        """Reconcile in-memory strategies with the state file.
+
+        Strategies stopped by another process are removed; strategies started
+        by another process are added. In-memory runtime state of strategies
+        that still exist is left untouched.
+        """
+        data = self._read_state_file()
+        saved_ids = set((data or {}).get("strategies", {}).keys())
+
+        with self._lock:
+            for sid in list(self._strategies.keys()):
+                if sid not in saved_ids:
+                    logger.info("Strategy %s removed by another process.", sid)
+                    self._strategies[sid].active = False
+                    del self._strategies[sid]
+
+        if data:
+            self.load_state()

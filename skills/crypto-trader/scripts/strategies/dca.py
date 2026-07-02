@@ -41,6 +41,10 @@ INTERVAL_SECONDS = {
 class DCAStrategy(BaseStrategy):
     name = "dca"
     display_name = "Dollar Cost Averaging"
+    _persist_attrs = (
+        "total_invested", "total_bought", "buy_count",
+        "avg_price", "last_buy_time",
+    )
 
     def __init__(self, strategy_id: str, params: Dict[str, Any], exchange_manager: Any, risk_manager: Any) -> None:
         super().__init__(strategy_id, params, exchange_manager, risk_manager)
@@ -118,8 +122,12 @@ class DCAStrategy(BaseStrategy):
 
     def on_order_filled(self, order: Dict[str, Any]) -> None:
         """Update DCA stats after a buy order fills."""
-        price = order.get("price") or order.get("cost", 0) / max(order.get("amount", 1), 1e-8)
-        amount = order.get("amount", 0)
+        price = (
+            order.get("average")
+            or order.get("price")
+            or order.get("cost", 0) / max(order.get("amount") or 0, 1e-8)
+        )
+        amount = order.get("filled") or order.get("amount") or 0
         cost = order.get("cost") or (price * amount)
 
         self.total_invested += cost
