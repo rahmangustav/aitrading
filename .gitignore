@@ -44,3 +44,11 @@ Thumbs.db
 .env
 .env.local
 *.env.*
+
+# Backup / editor scratch files
+*.bak
+*.bak[0-9]
+*.backup
+*.backup-*
+*.bak-*
+*.orig
