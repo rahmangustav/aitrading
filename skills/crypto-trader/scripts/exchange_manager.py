@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -26,6 +27,12 @@ _CONFIG_DIR = _PROJECT_ROOT / "config"
 
 _MAX_RETRIES = 3
 _RETRY_BACKOFF_BASE = 1.5
+
+# Protective stop-loss orders are placed as STOP_LOSS_LIMIT with the limit
+# price sitting this percentage below the stop trigger, so they still fill in a
+# fast-moving market instead of resting unfilled.
+_STOP_ORDER_TYPE = "STOP_LOSS_LIMIT"
+_STOP_LIMIT_OFFSET_PCT = 0.5
 
 _ERROR_MESSAGES: Dict[int, str] = {
     400: "Bad request. Check your parameters.",
@@ -175,6 +182,7 @@ class ExchangeManager:
         operation: str,
         func: Any,
         *args: Any,
+        idempotent: bool = True,
         **kwargs: Any,
     ) -> Any:
         exchange_cfg = self._config.get("exchanges", {}).get(exchange_name, {})
@@ -194,19 +202,24 @@ class ExchangeManager:
                 )
                 time.sleep(wait)
                 last_error = exc
-            except ccxt.NetworkError as exc:
-                wait = _RETRY_BACKOFF_BASE ** attempt
+            except (ccxt.NetworkError, ccxt.ExchangeNotAvailable) as exc:
+                # For non-idempotent calls (order creation) the request may have
+                # reached the exchange and executed even though we received no
+                # response. Retrying could place a DUPLICATE order, so never
+                # auto-retry -- surface it and let the caller reconcile.
+                if not idempotent:
+                    raise ExchangeError(
+                        exchange_name,
+                        f"{operation} failed with a network/availability error "
+                        f"and was NOT retried to avoid placing a duplicate "
+                        f"order: {exc}. Verify the order status on the exchange "
+                        f"before retrying.",
+                    ) from exc
+                factor = 2 if isinstance(exc, ccxt.ExchangeNotAvailable) else 1
+                wait = _RETRY_BACKOFF_BASE ** attempt * factor
                 logger.warning(
-                    "%s %s: network error (attempt %d/%d): %s",
+                    "%s %s: network/availability error (attempt %d/%d): %s",
                     exchange_name, operation, attempt, _MAX_RETRIES, str(exc),
-                )
-                time.sleep(wait)
-                last_error = exc
-            except ccxt.ExchangeNotAvailable as exc:
-                wait = _RETRY_BACKOFF_BASE ** attempt * 2
-                logger.warning(
-                    "%s %s: exchange unavailable (attempt %d/%d)",
-                    exchange_name, operation, attempt, _MAX_RETRIES,
                 )
                 time.sleep(wait)
                 last_error = exc
@@ -380,6 +393,60 @@ class ExchangeManager:
     # Public API: Orders
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _new_client_order_id(prefix: str = "ct") -> str:
+        """Generate a unique clientOrderId used as an idempotency key."""
+        return f"{prefix}-{uuid.uuid4().hex[:24]}"
+
+    def _normalize_amount(self, exchange_name: str, symbol: str, amount: float) -> float:
+        """Round an amount to the exchange lot precision and enforce the minimum."""
+        exchange = self._get_exchange(exchange_name)
+        rounded = amount
+        try:
+            rounded = float(exchange.amount_to_precision(symbol, amount))
+        except Exception as exc:  # pragma: no cover - depends on live market data
+            logger.debug("amount_to_precision failed for %s: %s", symbol, exc)
+        if rounded <= 0:
+            raise ExchangeError(
+                exchange_name,
+                f"Order amount {amount} for {symbol} rounds to zero at the "
+                f"exchange lot size.", status_code=400,
+            )
+        min_amt = self.get_min_order_amount(exchange_name, symbol)
+        if min_amt is not None and rounded < min_amt:
+            raise ExchangeError(
+                exchange_name,
+                f"Order amount {rounded} is below the minimum {min_amt} for {symbol}.",
+                status_code=400,
+            )
+        return rounded
+
+    def _normalize_price(self, exchange_name: str, symbol: str, price: float) -> float:
+        """Round a price to the exchange tick precision."""
+        exchange = self._get_exchange(exchange_name)
+        try:
+            return float(exchange.price_to_precision(symbol, price))
+        except Exception as exc:  # pragma: no cover - depends on live market data
+            logger.debug("price_to_precision failed for %s: %s", symbol, exc)
+            return price
+
+    def _check_min_notional(
+        self, exchange_name: str, symbol: str, amount: float, price: Optional[float]
+    ) -> None:
+        """Reject orders whose notional value is below the exchange minimum."""
+        if not price or price <= 0:
+            return
+        markets = self.get_markets(exchange_name)
+        market = markets.get(symbol) or {}
+        min_cost = market.get("limits", {}).get("cost", {}).get("min")
+        notional = amount * price
+        if min_cost is not None and notional < min_cost:
+            raise ExchangeError(
+                exchange_name,
+                f"Order notional {notional:.4f} is below the exchange minimum "
+                f"{min_cost} for {symbol}.", status_code=400,
+            )
+
     def place_order(
         self,
         exchange_name: str,
@@ -388,29 +455,40 @@ class ExchangeManager:
         amount: float,
         price: Optional[float] = None,
         order_type: str = "market",
+        client_order_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Place a new order. Returns order info dict."""
+        """Place a new order. Returns order info dict.
+
+        The amount (and price for limit orders) is rounded to the exchange
+        precision and validated against the symbol's minimum amount/notional
+        before submission. A clientOrderId is attached and the create call is
+        never auto-retried on ambiguous network errors, so a timed-out request
+        cannot silently place a duplicate order.
+        """
         exchange = self._get_exchange(exchange_name)
 
         if order_type == "limit" and price is None:
             raise ExchangeError(exchange_name, "Limit orders require a price parameter.")
 
+        amount = self._normalize_amount(exchange_name, symbol, amount)
+        if price is not None:
+            price = self._normalize_price(exchange_name, symbol, price)
+            self._check_min_notional(exchange_name, symbol, amount, price)
+
+        coid = client_order_id or self._new_client_order_id()
+        params = {"clientOrderId": coid}
+
         logger.info(
-            "Placing %s %s order: %s %s @ %s on %s",
+            "Placing %s %s order: %s %s @ %s on %s (coid=%s)",
             order_type, side, amount, symbol,
-            price if price else "market", exchange_name,
+            price if price else "market", exchange_name, coid,
         )
 
-        if order_type == "market":
-            order = self._execute_with_retry(
-                exchange_name, f"create_{side}_order({symbol})",
-                exchange.create_order, symbol, "market", side, amount,
-            )
-        else:
-            order = self._execute_with_retry(
-                exchange_name, f"create_{side}_order({symbol})",
-                exchange.create_order, symbol, "limit", side, amount, price,
-            )
+        order = self._execute_with_retry(
+            exchange_name, f"create_{side}_order({symbol})",
+            exchange.create_order, symbol, order_type, side, amount, price, params,
+            idempotent=False,
+        )
 
         self._cache.invalidate(f"balance:{exchange_name}")
         self._cache.invalidate(f"open_orders:{exchange_name}:{symbol}")
@@ -418,6 +496,7 @@ class ExchangeManager:
 
         return {
             "id": order.get("id"),
+            "clientOrderId": order.get("clientOrderId", coid),
             "symbol": order.get("symbol", symbol),
             "side": order.get("side", side),
             "type": order.get("type", order_type),
@@ -430,6 +509,102 @@ class ExchangeManager:
             "timestamp": order.get("timestamp"),
             "exchange": exchange_name,
         }
+
+    def place_stop_loss_order(
+        self,
+        exchange_name: str,
+        symbol: str,
+        amount: float,
+        stop_price: float,
+        limit_price: Optional[float] = None,
+        client_order_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Place an exchange-native protective stop-loss (sell) order.
+
+        This rests on the exchange, so the position stays protected even if the
+        bot process is not running. Uses a STOP_LOSS_LIMIT order whose limit
+        price defaults to just below the stop trigger so it still fills quickly.
+        """
+        amount = self._normalize_amount(exchange_name, symbol, amount)
+        stop_price = self._normalize_price(exchange_name, symbol, stop_price)
+        if limit_price is None:
+            limit_price = stop_price * (1 - _STOP_LIMIT_OFFSET_PCT / 100.0)
+        limit_price = self._normalize_price(exchange_name, symbol, limit_price)
+
+        exchange = self._get_exchange(exchange_name)
+        coid = client_order_id or self._new_client_order_id(prefix="sl")
+        params = {"stopPrice": stop_price, "clientOrderId": coid}
+
+        logger.info(
+            "Placing protective stop-loss: sell %s %s stop=%s limit=%s on %s (coid=%s)",
+            amount, symbol, stop_price, limit_price, exchange_name, coid,
+        )
+
+        order = self._execute_with_retry(
+            exchange_name, f"stop_loss({symbol})",
+            exchange.create_order, symbol, _STOP_ORDER_TYPE, "sell", amount,
+            limit_price, params,
+            idempotent=False,
+        )
+
+        self._cache.invalidate(f"open_orders:{exchange_name}:{symbol}")
+        self._cache.invalidate(f"open_orders:{exchange_name}:None")
+
+        return {
+            "id": order.get("id"),
+            "clientOrderId": order.get("clientOrderId", coid),
+            "symbol": order.get("symbol", symbol),
+            "side": order.get("side", "sell"),
+            "type": order.get("type", _STOP_ORDER_TYPE),
+            "amount": order.get("amount", amount),
+            "stop_price": stop_price,
+            "limit_price": limit_price,
+            "status": order.get("status"),
+            "exchange": exchange_name,
+        }
+
+    def cancel_stop_orders(
+        self, exchange_name: str, symbol: str
+    ) -> List[Dict[str, Any]]:
+        """Cancel any resting stop orders for a symbol.
+
+        Called before submitting a manual/strategy sell so a protective stop
+        cannot fire on top of it and sell the same position twice.
+        """
+        exchange = self._get_exchange(exchange_name)
+        try:
+            raw_orders = self._execute_with_retry(
+                exchange_name, "fetch_open_orders",
+                exchange.fetch_open_orders, symbol,
+            )
+        except ExchangeError as exc:
+            logger.error("Could not fetch open orders to cancel stops: %s", exc)
+            return []
+
+        results: List[Dict[str, Any]] = []
+        for order in raw_orders:
+            if not self._is_stop_order(order):
+                continue
+            try:
+                self.cancel_order(exchange_name, order.get("id"), order.get("symbol", symbol))
+                results.append({"id": order.get("id"), "status": "canceled"})
+            except ExchangeError as exc:
+                logger.error("Failed to cancel stop order %s: %s", order.get("id"), exc)
+                results.append({
+                    "id": order.get("id"), "status": "cancel_failed", "error": str(exc),
+                })
+        return results
+
+    @staticmethod
+    def _is_stop_order(order: Dict[str, Any]) -> bool:
+        """Best-effort detection of a stop / stop-limit order across exchanges."""
+        otype = str(order.get("type", "")).lower()
+        if "stop" in otype:
+            return True
+        info = order.get("info", {})
+        if isinstance(info, dict) and "stop" in str(info.get("type", "")).lower():
+            return True
+        return bool(order.get("stopPrice") or order.get("triggerPrice"))
 
     def cancel_order(
         self, exchange_name: str, order_id: str, symbol: Optional[str] = None
