@@ -437,6 +437,17 @@ class MonitorDaemon:
                 open_order_count=len(open_orders),
             )
 
+            # Before selling, cancel any protective stop resting for this
+            # symbol so it can't fire on top of this sell (double-sell).
+            if side == "sell":
+                try:
+                    exchange_manager.cancel_stop_orders(exchange, symbol)
+                except Exception as exc:
+                    logger.warning(
+                        "Could not cancel resting stops for %s before sell: %s",
+                        symbol, exc,
+                    )
+
             order = exchange_manager.place_order(
                 exchange, symbol, side, amount, price, order_type,
             )
@@ -464,6 +475,11 @@ class MonitorDaemon:
             strategy.on_order_placed(signal_data, order)
 
             if order.get("status") in ("closed", "filled"):
+                if side == "buy":
+                    self._place_protective_stop(
+                        exchange_manager, risk_manager, notifier,
+                        exchange, symbol, order,
+                    )
                 follow_up = strategy.on_order_filled(order)
                 if follow_up:
                     follow_up.setdefault("strategy_id", strategy_id)
@@ -486,6 +502,58 @@ class MonitorDaemon:
                     "error": str(exc),
                 })
         return None
+
+    def _place_protective_stop(
+        self,
+        exchange_manager: Any,
+        risk_manager: Any,
+        notifier: Any,
+        exchange: str,
+        symbol: str,
+        filled_order: Dict[str, Any],
+    ) -> None:
+        """Place an exchange-native stop-loss right after a buy fills.
+
+        The exchange holds the stop, so the position stays protected even if
+        this daemon stops running. The strategy-loop stop-loss remains as a
+        secondary guard.
+        """
+        try:
+            entry = filled_order.get("price")
+            cost = filled_order.get("cost")
+            filled_amt = filled_order.get("filled")
+            if not entry and cost and filled_amt:
+                entry = cost / filled_amt
+            amount = filled_amt or filled_order.get("amount")
+            if not entry or not amount:
+                logger.warning(
+                    "Cannot place protective stop for %s: missing entry/amount.", symbol,
+                )
+                return
+
+            stop_price = risk_manager.stop_loss_price(entry, side="buy")
+            if not stop_price:
+                return  # stop-loss disabled by config
+
+            stop = exchange_manager.place_stop_loss_order(
+                exchange, symbol, amount, stop_price,
+            )
+            logger.info(
+                "Protective stop placed for %s at %s (order %s).",
+                symbol, stop_price, stop.get("id"),
+            )
+        except Exception as exc:
+            # The position is now UNPROTECTED at the exchange. The strategy-loop
+            # stop is the only remaining guard -- make noise so it gets noticed.
+            logger.critical(
+                "FAILED to place protective stop-loss for %s: %s. Position is "
+                "unprotected if the bot stops running!", symbol, exc,
+            )
+            if notifier:
+                notifier.send_alert("strategy_error", {
+                    "strategy": "risk",
+                    "error": f"Stop-loss placement failed for {symbol}: {exc}",
+                })
 
     def _check_sentiment(self, notifier: Any) -> None:
         """Run periodic sentiment checks."""

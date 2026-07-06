@@ -260,6 +260,27 @@ class RiskManager:
         loss_pct = ((entry_price - current_price) / entry_price) * 100
         return loss_pct >= threshold
 
+    def stop_loss_price(
+        self,
+        entry_price: float,
+        side: str = "buy",
+        custom_pct: Optional[float] = None,
+    ) -> Optional[float]:
+        """Return the protective stop-loss trigger price for a filled entry.
+
+        Returns None when stop-loss is disabled or misconfigured. For a long
+        (buy) entry the stop sits below the entry by the configured percentage;
+        for a short it sits above.
+        """
+        if not self._stop_loss_cfg.get("enabled", True):
+            return None
+        pct = custom_pct if custom_pct is not None else self._stop_loss_cfg.get("default_pct", 5.0)
+        if not pct or pct <= 0 or entry_price <= 0:
+            return None
+        if side == "buy":
+            return entry_price * (1 - pct / 100.0)
+        return entry_price * (1 + pct / 100.0)
+
     def check_trailing_stop(
         self,
         highest_price: float,
