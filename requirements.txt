@@ -1,0 +1,5 @@
+ccxt
+httpx
+pandas
+PyYAML
+python-dotenv
