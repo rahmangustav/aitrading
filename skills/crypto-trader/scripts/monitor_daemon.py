@@ -18,6 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from entry_quality import entry_quality, trend_filter
+
 logger = logging.getLogger("crypto-trader.monitor")
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +53,11 @@ class MonitorDaemon:
         # this daemon that have not filled yet, so fills can be dispatched to
         # the owning strategy.
         self._order_registry: Dict[str, Dict[str, Any]] = {}
+        # Entry-quality gate for BUY signals (ported from the monolith). Fails
+        # open; disable with CRYPTO_ENTRY_QUALITY=false.
+        self._entry_quality_on = os.environ.get(
+            "CRYPTO_ENTRY_QUALITY", "true",
+        ).lower() == "true"
 
     # ------------------------------------------------------------------
     # State management
@@ -416,6 +423,14 @@ class MonitorDaemon:
         order_type = signal_data.get("order_type", "market")
 
         try:
+            # Entry-quality gate: filter out low-quality BUYs (dead-cat
+            # bounces, volume crashes, 4h downtrends). Fails open.
+            if side == "buy" and self._entry_quality_on:
+                ok, reason = self._passes_entry_quality(exchange_manager, exchange, symbol)
+                if not ok:
+                    logger.info("Entry-quality gate blocked BUY %s: %s", symbol, reason)
+                    return None
+
             # Market orders carry no price; fetch a reference price so the
             # risk manager can enforce size limits.
             ref_price = price
@@ -502,6 +517,24 @@ class MonitorDaemon:
                     "error": str(exc),
                 })
         return None
+
+    def _passes_entry_quality(
+        self, exchange_manager: Any, exchange: str, symbol: str,
+    ) -> tuple[bool, str]:
+        """Run the ported entry-quality + 4h trend gate. Fails open on error."""
+        try:
+            ohlcv_1h = exchange_manager.get_ohlcv(exchange, symbol, "1h", limit=30)
+            ok, reason = entry_quality(ohlcv_1h)
+            if not ok:
+                return False, reason
+            ohlcv_4h = exchange_manager.get_ohlcv(exchange, symbol, "4h", limit=30)
+            trend_ok, trend_reason = trend_filter(ohlcv_4h)
+            if not trend_ok:
+                return False, trend_reason
+            return True, reason
+        except Exception as exc:
+            logger.warning("Entry-quality check errored for %s (allowing): %s", symbol, exc)
+            return True, "entry-quality check errored -- fail open"
 
     def _place_protective_stop(
         self,
