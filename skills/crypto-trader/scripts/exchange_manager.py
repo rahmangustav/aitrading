@@ -121,8 +121,28 @@ class ExchangeManager:
             # only opt out of sandbox when CRYPTO_DEMO is explicitly false.
             use_sandbox = self._demo or cfg.get("sandbox", True)
             if use_sandbox:
-                sandbox_urls = cfg.get("sandbox_urls")
-                if sandbox_urls:
+                # Prefer CCXT's native sandbox mode: it maps ALL endpoints
+                # (spot + sapi) to the exchange testnet correctly. Blindly
+                # rewriting every api URL to a single testnet base breaks
+                # sapi-backed calls like fetch_balance (404 on testnet).
+                applied = False
+                try:
+                    exchange.set_sandbox_mode(True)
+                    applied = True
+                    logger.info("Exchange %s: sandbox mode enabled via CCXT.", name)
+                except Exception as exc:
+                    logger.warning(
+                        "Exchange %s: CCXT sandbox mode unavailable (%s); "
+                        "falling back to custom sandbox URLs.", name, exc,
+                    )
+                if not applied:
+                    sandbox_urls = cfg.get("sandbox_urls")
+                    if not sandbox_urls:
+                        logger.error(
+                            "Exchange %s: no sandbox support and no custom URLs. "
+                            "Skipping instead of falling back to live.", name,
+                        )
+                        continue
                     if "api" in sandbox_urls:
                         if isinstance(exchange.urls.get("api"), dict):
                             for key in exchange.urls["api"]:
@@ -132,17 +152,6 @@ class ExchangeManager:
                     if "ws" in sandbox_urls:
                         exchange.urls["ws"] = sandbox_urls["ws"]
                     logger.info("Exchange %s: using custom sandbox URLs.", name)
-                else:
-                    try:
-                        exchange.set_sandbox_mode(True)
-                        logger.info("Exchange %s: sandbox mode enabled via CCXT.", name)
-                    except Exception:
-                        logger.error(
-                            "Exchange %s: sandbox mode not available. Skipping "
-                            "exchange instead of falling back to live URLs.",
-                            name,
-                        )
-                        continue
 
             self._exchanges[name] = exchange
             logger.info("Exchange %s initialized (sandbox=%s).", name, use_sandbox)
@@ -662,6 +671,11 @@ class ExchangeManager:
                 "type": o.get("type"),
                 "amount": o.get("amount"),
                 "price": o.get("price"),
+                # Preserve trigger info so stop / stop-limit orders stay
+                # identifiable after normalization (else _is_stop_order can't
+                # spot them via this path).
+                "stopPrice": o.get("stopPrice"),
+                "triggerPrice": o.get("triggerPrice"),
                 "filled": o.get("filled"),
                 "remaining": o.get("remaining"),
                 "status": o.get("status"),
