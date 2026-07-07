@@ -294,6 +294,33 @@ class RiskManager:
         drop_pct = ((highest_price - current_price) / highest_price) * 100
         return drop_pct >= threshold
 
+    def tiered_trailing_stop(
+        self,
+        entry_price: float,
+        current_price: float,
+        prev_stop: Optional[float] = None,
+    ) -> Optional[float]:
+        """Ratcheting trailing stop ported from the monolith.
+
+        Once a long is up >2% the stop moves to breakeven; up >3% it locks in
+        +1.5%. The stop only ever ratchets UP -- it returns the previous stop
+        unchanged when the new candidate would be lower (or profit is too small
+        to trail yet). Returns None only when no stop is set and none is due.
+        """
+        if entry_price <= 0:
+            return prev_stop
+        pnl_pct = ((current_price - entry_price) / entry_price) * 100
+        new_stop: Optional[float] = None
+        if pnl_pct > 3.0:
+            new_stop = entry_price * 1.015
+        elif pnl_pct > 2.0:
+            new_stop = entry_price
+        if new_stop is None:
+            return prev_stop
+        if prev_stop is None or new_stop > prev_stop:
+            return new_stop
+        return prev_stop
+
     def check_take_profit(
         self,
         entry_price: float,
