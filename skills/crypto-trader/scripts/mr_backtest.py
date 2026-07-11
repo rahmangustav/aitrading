@@ -53,7 +53,9 @@ def backtest_mean_reversion(
     params (all optional):
       bb_period (20), bb_std (2.0), rsi_period (14), rsi_oversold (30),
       atr_period (14), sl_atr_mult (1.5), rr (1.0), max_hold_bars (48),
-      adx_period (14), adx_range_threshold (20), warmup (60)
+      adx_period (14), adx_range_threshold (20), warmup (60),
+      bull_sma_period (0 = off) -- master switch: only enter when the close
+      is above this SMA. Fails closed while the SMA has too little data.
     """
     p = params or {}
     bb_period = p.get("bb_period", 20)
@@ -68,12 +70,27 @@ def backtest_mean_reversion(
     adx_range_threshold = p.get("adx_range_threshold", 20.0)
     warmup = max(p.get("warmup", 60), bb_period, rsi_period + 1, 2 * adx_period + 1)
     regime_lookback = p.get("regime_lookback", 100)
+    bull_sma_period = p.get("bull_sma_period", 0)
 
     round_trip_cost_pct = 2 * fee_pct + 2 * slippage_pct
+
+    # Rolling SMA for the bull master switch (fails closed on thin data).
+    bull_ok: List[bool] = [False] * len(ohlcv)
+    if bull_sma_period > 0:
+        running = 0.0
+        for i, candle in enumerate(ohlcv):
+            running += candle[_C]
+            if i >= bull_sma_period:
+                running -= ohlcv[i - bull_sma_period][_C]
+            if i >= bull_sma_period - 1:
+                bull_ok[i] = candle[_C] > running / bull_sma_period
+    else:
+        bull_ok = [True] * len(ohlcv)
 
     trades: List[Dict[str, Any]] = []
     position = None  # dict(entry, sl, tp, entry_idx)
     blocked_by_regime = 0
+    blocked_by_bull = 0
     signals = 0
 
     for i in range(warmup, len(ohlcv)):
@@ -111,6 +128,9 @@ def backtest_mean_reversion(
 
         if close < lower and rsi_val < rsi_oversold:
             signals += 1
+            if not bull_ok[i]:
+                blocked_by_bull += 1
+                continue
             regime_window = ohlcv[max(0, i - regime_lookback): i + 1]
             regime, _details = detect_regime(
                 regime_window, adx_period=adx_period,
@@ -147,10 +167,10 @@ def backtest_mean_reversion(
             "hold_bars": len(ohlcv) - 1 - position["entry_idx"],
         })
 
-    return _metrics(trades, signals, blocked_by_regime)
+    return _metrics(trades, signals, blocked_by_regime, blocked_by_bull)
 
 
-def _metrics(trades: List[Dict[str, Any]], signals: int, blocked: int) -> Dict[str, Any]:
+def _metrics(trades: List[Dict[str, Any]], signals: int, blocked: int, blocked_bull: int = 0) -> Dict[str, Any]:
     wins = [t for t in trades if t["net_pct"] > 0]
     losses = [t for t in trades if t["net_pct"] <= 0]
     total = len(trades)
@@ -177,6 +197,7 @@ def _metrics(trades: List[Dict[str, Any]], signals: int, blocked: int) -> Dict[s
         "max_drawdown_pct": round(max_dd, 2),
         "signals": signals,
         "blocked_by_regime": blocked,
+        "blocked_by_bull": blocked_bull,
         "exit_reasons": {
             r: sum(1 for t in trades if t["reason"] == r)
             for r in ("tp", "sl", "time", "eod")

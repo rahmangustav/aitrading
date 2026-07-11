@@ -101,6 +101,29 @@ class TestMeanReversionBacktest:
         res = backtest_mean_reversion(_candles(prices))
         assert res["total_trades"] == 0
 
+    def test_bull_filter_blocks_entries_below_sma(self):
+        # Slow downtrend with noise: price stays below its SMA, so with the
+        # bull filter on every signal must be blocked.
+        import random
+        rng = random.Random(11)
+        prices = []
+        p = 200.0
+        for _ in range(600):
+            p += -0.15 + rng.gauss(0, 0.5)
+            prices.append(p)
+        candles = _candles(prices, spread=0.2)
+        base = backtest_mean_reversion(candles, {"adx_range_threshold": 100})
+        gated = backtest_mean_reversion(
+            candles, {"adx_range_threshold": 100, "bull_sma_period": 200})
+        assert base["signals"] > 0
+        assert gated["blocked_by_bull"] > 0
+        assert gated["total_trades"] < max(base["total_trades"], 1) or \
+            gated["total_trades"] == 0
+
+    def test_bull_filter_off_by_default(self):
+        res = backtest_mean_reversion(_flat(300))
+        assert res["blocked_by_bull"] == 0
+
     def test_sl_is_below_entry_and_tp_respects_rr(self):
         # V-shaped dip inside an otherwise flat market -> at least one trade,
         # and every trade's net outcome is bounded by the SL distance.

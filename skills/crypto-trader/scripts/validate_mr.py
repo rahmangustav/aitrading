@@ -26,6 +26,29 @@ from mr_backtest import backtest_mean_reversion  # noqa: E402
 
 DEFAULT_PAIRS = ["SOL/USDT", "BNB/USDT", "DOGE/USDT", "ADA/USDT", "LINK/USDT"]
 
+# Quote assets / token patterns that are not real trading candidates.
+_EXCLUDE_BASES = {
+    "USDC", "FDUSD", "TUSD", "DAI", "BUSD", "EUR", "TRY", "BRL", "ARS",
+    "USDP", "AEUR", "XUSD", "USD1", "PAXG",
+}
+
+
+def top_liquid_pairs(exchange, n: int) -> list:
+    """Top-n spot USDT pairs by 24h quote volume (stables/leveraged excluded)."""
+    tickers = exchange.fetch_tickers()
+    rows = []
+    for sym, t in tickers.items():
+        if not sym.endswith("/USDT") or ":" in sym:
+            continue
+        base = sym.split("/")[0]
+        if base in _EXCLUDE_BASES or base.endswith(("UP", "DOWN", "BULL", "BEAR")):
+            continue
+        qv = t.get("quoteVolume") or 0
+        if qv:
+            rows.append((qv, sym))
+    rows.sort(reverse=True)
+    return [sym for _qv, sym in rows[:n]]
+
 
 def fetch_ohlcv(exchange, symbol: str, timeframe: str, months: int) -> list:
     ms_per_candle = exchange.parse_timeframe(timeframe) * 1000
@@ -50,9 +73,17 @@ def main() -> None:
     ap.add_argument("--months", type=int, default=6)
     ap.add_argument("--grid", action="store_true", help="run a small parameter grid")
     ap.add_argument("--json", action="store_true", help="dump full JSON results")
+    ap.add_argument("--top", type=int, default=0,
+                    help="ignore --pairs and use the top-N most liquid USDT pairs")
+    ap.add_argument("--bull-sma", type=int, default=0,
+                    help="add a bull master switch: only enter above this SMA")
     args = ap.parse_args()
 
     ex = ccxt.binance({"enableRateLimit": True})
+
+    if args.top > 0:
+        args.pairs = top_liquid_pairs(ex, args.top)
+        print(f"Top-{args.top} pair likuid: {', '.join(args.pairs)}")
 
     if args.grid:
         param_sets = [
@@ -64,6 +95,11 @@ def main() -> None:
         ]
     else:
         param_sets = [{"label": "base rr=1.0 sl=1.5atr adx<20", "rr": 1.0, "sl_atr_mult": 1.5, "adx_range_threshold": 20}]
+
+    if args.bull_sma > 0:
+        for ps in param_sets:
+            ps["bull_sma_period"] = args.bull_sma
+            ps["label"] = f"{ps['label']} +bullSMA{args.bull_sma}"
 
     all_results = []
     for symbol in args.pairs:
