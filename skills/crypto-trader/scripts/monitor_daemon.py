@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from entry_quality import entry_quality, trend_filter
+try:  # jembatan ke Live Learning Engine (fail-open: tak boleh ganggu trading)
+    import learning_bridge
+except Exception:  # pragma: no cover
+    learning_bridge = None
 
 logger = logging.getLogger("crypto-trader.monitor")
 
@@ -41,6 +45,7 @@ CHECK_RISK_INTERVAL = 60
 EVALUATE_STRATEGIES_INTERVAL = 300
 SENTIMENT_INTERVAL = 1800
 SNAPSHOT_INTERVAL = 60
+LEARN_INTERVAL = 900  # verifikasi sinyal ke harga mainnet + tulis laporan tiap 15 mnt
 
 
 class MonitorDaemon:
@@ -227,6 +232,7 @@ class MonitorDaemon:
         last_evaluate = 0.0
         last_sentiment = 0.0
         last_snapshot = 0.0
+        last_learn = 0.0
 
         while self._running:
             now = time.time()
@@ -253,6 +259,17 @@ class MonitorDaemon:
                 if now - last_sentiment >= SENTIMENT_INTERVAL:
                     self._check_sentiment(notifier)
                     last_sentiment = now
+
+                if learning_bridge is not None and now - last_learn >= LEARN_INTERVAL:
+                    summary = learning_bridge.refresh()
+                    if summary:
+                        logger.info(
+                            "Learning: %s sinyal (verified %s, pending %s), "
+                            "baru diverifikasi %s.",
+                            summary.get("total_signals"), summary.get("verified"),
+                            summary.get("pending"), summary.get("verified_now"),
+                        )
+                    last_learn = now
 
                 self._state["last_check"] = datetime.now(timezone.utc).isoformat()
                 self._state["checks_performed"] = self._state.get("checks_performed", 0) + 1
@@ -495,6 +512,18 @@ class MonitorDaemon:
                         exchange_manager, risk_manager, notifier,
                         exchange, symbol, order,
                     )
+                    # Catat entry ke Live Learning Engine (fail-open).
+                    if learning_bridge is not None:
+                        entry_px = (order.get("average") or order.get("price")
+                                    or ref_price)
+                        if not entry_px and order.get("cost") and order.get("filled"):
+                            entry_px = order["cost"] / order["filled"]
+                        learning_bridge.record_entry(
+                            symbol, entry_px,
+                            confidence=signal_data.get("confidence"),
+                            ta={"strategy": strategy_name,
+                                "reason": signal_data.get("reason", "")},
+                        )
                 follow_up = strategy.on_order_filled(order)
                 if follow_up:
                     follow_up.setdefault("strategy_id", strategy_id)

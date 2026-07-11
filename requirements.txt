@@ -3,3 +3,5 @@ httpx
 pandas
 PyYAML
 python-dotenv
+vaderSentiment
+feedparser

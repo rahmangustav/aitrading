@@ -1,0 +1,141 @@
+{
+  "signals": [
+    {
+      "ts": "2026-07-07T15:05:34.537948+00:00",
+      "pair": "HEIUSDT",
+      "signal": "BUY",
+      "price": 0.1243,
+      "confidence": null,
+      "llm_sentiment": null,
+      "ta": {
+        "strategy": "trend_following",
+        "reason": "golden cross EMA9/21 + RSI<70"
+      },
+      "status": "open",
+      "verified": false,
+      "result_4h": null,
+      "result_8h": null,
+      "result_24h": null
+    },
+    {
+      "ts": "2026-07-07T15:05:34.538494+00:00",
+      "pair": "PENDLEUSDT",
+      "signal": "BUY",
+      "price": 1.488,
+      "confidence": null,
+      "llm_sentiment": null,
+      "ta": {
+        "strategy": "trend_following",
+        "reason": "golden cross EMA9/21 + RSI<70"
+      },
+      "status": "open",
+      "verified": false,
+      "result_4h": null,
+      "result_8h": null,
+      "result_24h": null
+    },
+    {
+      "ts": "2026-07-07T15:05:34.538938+00:00",
+      "pair": "ATMUSDT",
+      "signal": "BUY",
+      "price": 2.288,
+      "confidence": null,
+      "llm_sentiment": null,
+      "ta": {
+        "strategy": "trend_following",
+        "reason": "golden cross EMA9/21 + RSI<70"
+      },
+      "status": "open",
+      "verified": false,
+      "result_4h": null,
+      "result_8h": null,
+      "result_24h": null
+    },
+    {
+      "ts": "2026-07-07T15:05:34.539305+00:00",
+      "pair": "GMTUSDT",
+      "signal": "BUY",
+      "price": 0.00792,
+      "confidence": null,
+      "llm_sentiment": null,
+      "ta": {
+        "strategy": "trend_following",
+        "reason": "golden cross EMA9/21 + RSI<70"
+      },
+      "status": "open",
+      "verified": false,
+      "result_4h": null,
+      "result_8h": null,
+      "result_24h": null
+    },
+    {
+      "ts": "2026-07-07T15:05:34.539738+00:00",
+      "pair": "ICPUSDT",
+      "signal": "BUY",
+      "price": 2.205,
+      "confidence": null,
+      "llm_sentiment": null,
+      "ta": {
+        "strategy": "trend_following",
+        "reason": "golden cross EMA9/21 + RSI<70"
+      },
+      "status": "open",
+      "verified": false,
+      "result_4h": null,
+      "result_8h": null,
+      "result_24h": null
+    },
+    {
+      "ts": "2026-07-07T15:05:34.540253+00:00",
+      "pair": "ENJUSDT",
+      "signal": "BUY",
+      "price": 0.03017,
+      "confidence": null,
+      "llm_sentiment": null,
+      "ta": {
+        "strategy": "trend_following",
+        "reason": "golden cross EMA9/21 + RSI<70"
+      },
+      "status": "open",
+      "verified": false,
+      "result_4h": null,
+      "result_8h": null,
+      "result_24h": null
+    },
+    {
+      "ts": "2026-07-07T15:05:34.540808+00:00",
+      "pair": "WCTUSDT",
+      "signal": "BUY",
+      "price": 0.04418,
+      "confidence": null,
+      "llm_sentiment": null,
+      "ta": {
+        "strategy": "trend_following",
+        "reason": "golden cross EMA9/21 + RSI<70"
+      },
+      "status": "open",
+      "verified": false,
+      "result_4h": null,
+      "result_8h": null,
+      "result_24h": null
+    },
+    {
+      "ts": "2026-07-07T15:05:34.541302+00:00",
+      "pair": "OPGUSDT",
+      "signal": "BUY",
+      "price": 0.1321,
+      "confidence": null,
+      "llm_sentiment": null,
+      "ta": {
+        "strategy": "trend_following",
+        "reason": "golden cross EMA9/21 + RSI<70"
+      },
+      "status": "open",
+      "verified": false,
+      "result_4h": null,
+      "result_8h": null,
+      "result_24h": null
+    }
+  ],
+  "accuracy": {}
+}
