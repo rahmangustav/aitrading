@@ -52,3 +52,5 @@ Thumbs.db
 *.backup-*
 *.bak-*
 *.orig
+# Runtime output (backtest results, cache)
+skills/crypto-trader/data/
