@@ -66,45 +66,80 @@ def bulk_get_prices():
     except:
         return {}
 
+def get_price_at(symbol, target_dt):
+    """Price of `symbol` AT `target_dt` (UTC), from the 1-minute kline opening then.
+
+    Returns 0 when the price is unavailable (pair delisted, target in the future,
+    network error) so the caller can leave the horizon unfilled and retry later.
+    """
+    start_ms = int(target_dt.timestamp() * 1000)
+    try:
+        klines = api_get("/api/v3/klines", {
+            "symbol": symbol,
+            "interval": "1m",
+            "startTime": start_ms,
+            "limit": 1,
+        })
+        if not isinstance(klines, list) or not klines:
+            return 0
+        return float(klines[0][1])  # open of the minute the horizon lands on
+    except Exception:
+        return 0
+
 def verify_signals():
-    """Verify signals with bulk price fetch — 30 per run, 1 API call."""
+    """Verify signals against the price at each horizon — 30 signals per run.
+
+    Each horizon is measured at its own moment (ts+4h, ts+8h, ts+24h) via historical
+    klines. Using the price at verification time instead would collapse all three
+    horizons onto one number whenever a run lands late (daemon down, backfilled
+    signals), which silently fabricates the 4h and 8h results.
+    """
     db = load_signal_db()
     now = datetime.now(timezone.utc)
     updated = 0
     checked = 0
     BATCH = 30
-    
-    # One API call for all prices
+
+    # Cheap liveness + pair-existence check before spending klines calls
     all_prices = bulk_get_prices()
     if not all_prices:
         return 0
-    
+
     for sig in db["signals"]:
         if checked >= BATCH:
             break
         if sig.get("verified"):
             continue
-        
+
         sig_ts = datetime.fromisoformat(sig["ts"])
         hours_ago = (now - sig_ts).total_seconds() / 3600
-        
+
         if hours_ago < 4:
             continue
-        
+
         checked += 1
-        current = all_prices.get(sig["pair"], 0)
-        if current <= 0:
+        if all_prices.get(sig["pair"], 0) <= 0:
             continue
-        
+
+        filled = 0
         for mark, key in [(4, "result_4h"), (8, "result_8h"), (24, "result_24h")]:
-            if hours_ago >= mark and sig.get(key) is None:
-                pct = ((current - sig["price"]) / sig["price"]) * 100
-                sig[key] = round(pct, 2)
-                updated += 1
-        
-        if hours_ago >= 24:
+            if sig.get(key) is not None:
+                filled += 1
+                continue
+            if hours_ago < mark:
+                continue
+            price_at = get_price_at(sig["pair"], sig_ts + timedelta(hours=mark))
+            if price_at <= 0:
+                continue
+            sig[key] = round(((price_at - sig["price"]) / sig["price"]) * 100, 2)
+            filled += 1
+            updated += 1
+
+        # Only close the book once every horizon actually landed, otherwise a
+        # transient fetch failure would freeze a horizon at None forever.
+        if hours_ago >= 24 and filled == 3:
             sig["verified"] = True
-    
+
     if updated > 0:
         save_signal_db(db)
     return updated

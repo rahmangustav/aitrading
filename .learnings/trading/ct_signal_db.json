@@ -12,10 +12,10 @@
         "reason": "golden cross EMA9/21 + RSI<70"
       },
       "status": "open",
-      "verified": false,
-      "result_4h": null,
-      "result_8h": null,
-      "result_24h": null
+      "verified": true,
+      "result_4h": -9.57,
+      "result_8h": -11.75,
+      "result_24h": 0.8
     },
     {
       "ts": "2026-07-07T15:05:34.538494+00:00",
@@ -29,10 +29,10 @@
         "reason": "golden cross EMA9/21 + RSI<70"
       },
       "status": "open",
-      "verified": false,
-      "result_4h": null,
-      "result_8h": null,
-      "result_24h": null
+      "verified": true,
+      "result_4h": 0.4,
+      "result_8h": 0.13,
+      "result_24h": 0.54
     },
     {
       "ts": "2026-07-07T15:05:34.538938+00:00",
@@ -46,10 +46,10 @@
         "reason": "golden cross EMA9/21 + RSI<70"
       },
       "status": "open",
-      "verified": false,
-      "result_4h": null,
-      "result_8h": null,
-      "result_24h": null
+      "verified": true,
+      "result_4h": 0.52,
+      "result_8h": 0.52,
+      "result_24h": -0.22
     },
     {
       "ts": "2026-07-07T15:05:34.539305+00:00",
@@ -63,10 +63,10 @@
         "reason": "golden cross EMA9/21 + RSI<70"
       },
       "status": "open",
-      "verified": false,
-      "result_4h": null,
-      "result_8h": null,
-      "result_24h": null
+      "verified": true,
+      "result_4h": -1.14,
+      "result_8h": -2.53,
+      "result_24h": -5.05
     },
     {
       "ts": "2026-07-07T15:05:34.539738+00:00",
@@ -80,10 +80,10 @@
         "reason": "golden cross EMA9/21 + RSI<70"
       },
       "status": "open",
-      "verified": false,
-      "result_4h": null,
-      "result_8h": null,
-      "result_24h": null
+      "verified": true,
+      "result_4h": -0.14,
+      "result_8h": 0.23,
+      "result_24h": -1.54
     },
     {
       "ts": "2026-07-07T15:05:34.540253+00:00",
@@ -97,10 +97,10 @@
         "reason": "golden cross EMA9/21 + RSI<70"
       },
       "status": "open",
-      "verified": false,
-      "result_4h": null,
-      "result_8h": null,
-      "result_24h": null
+      "verified": true,
+      "result_4h": -4.18,
+      "result_8h": -3.81,
+      "result_24h": -8.29
     },
     {
       "ts": "2026-07-07T15:05:34.540808+00:00",
@@ -114,10 +114,10 @@
         "reason": "golden cross EMA9/21 + RSI<70"
       },
       "status": "open",
-      "verified": false,
-      "result_4h": null,
-      "result_8h": null,
-      "result_24h": null
+      "verified": true,
+      "result_4h": -1.65,
+      "result_8h": -1.31,
+      "result_24h": -1.11
     },
     {
       "ts": "2026-07-07T15:05:34.541302+00:00",
@@ -131,10 +131,10 @@
         "reason": "golden cross EMA9/21 + RSI<70"
       },
       "status": "open",
-      "verified": false,
-      "result_4h": null,
-      "result_8h": null,
-      "result_24h": null
+      "verified": true,
+      "result_4h": -3.33,
+      "result_8h": -3.48,
+      "result_24h": -9.46
     }
   ],
   "accuracy": {}
