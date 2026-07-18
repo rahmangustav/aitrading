@@ -37,6 +37,9 @@ logger = logging.getLogger("crypto-trader.strategy.scalping")
 class ScalpingStrategy(BaseStrategy):
     name = "scalping"
     display_name = "Scalping"
+    _persist_attrs = (
+        "position", "position_amount", "entry_price", "entry_time",
+    )
 
     def __init__(self, strategy_id: str, params: Dict[str, Any], exchange_manager: Any, risk_manager: Any) -> None:
         super().__init__(strategy_id, params, exchange_manager, risk_manager)
@@ -49,6 +52,7 @@ class ScalpingStrategy(BaseStrategy):
         self.exchange: str = params.get("exchange", "")
 
         self.position: Optional[str] = None
+        self.position_amount: float = 0.0
         self.entry_price: float = 0.0
         self.entry_time: float = 0.0
 
@@ -84,13 +88,19 @@ class ScalpingStrategy(BaseStrategy):
         if self.position == "long":
             profit_pct = ((current_price - self.entry_price) / self.entry_price) * 100
             hold_time = time.time() - self.entry_time
+            # Exits must sell what was actually bought, not a fresh amount
+            # derived from the current entry price.
+            sell_amount = round(
+                self.position_amount if self.position_amount > 0
+                else self.order_amount_usdt / self.entry_price,
+                8,
+            )
 
             if profit_pct >= self.profit_target:
-                amount = self.order_amount_usdt / self.entry_price
                 signals.append({
                     "symbol": self.symbol,
                     "side": "sell",
-                    "amount": round(amount, 8),
+                    "amount": sell_amount,
                     "price": None,
                     "order_type": "market",
                     "exchange": self.exchange,
@@ -98,11 +108,10 @@ class ScalpingStrategy(BaseStrategy):
                 })
 
             elif profit_pct < -self.profit_target:
-                amount = self.order_amount_usdt / self.entry_price
                 signals.append({
                     "symbol": self.symbol,
                     "side": "sell",
-                    "amount": round(amount, 8),
+                    "amount": sell_amount,
                     "price": None,
                     "order_type": "market",
                     "exchange": self.exchange,
@@ -110,11 +119,10 @@ class ScalpingStrategy(BaseStrategy):
                 })
 
             elif hold_time > self.max_hold_seconds:
-                amount = self.order_amount_usdt / self.entry_price
                 signals.append({
                     "symbol": self.symbol,
                     "side": "sell",
-                    "amount": round(amount, 8),
+                    "amount": sell_amount,
                     "price": None,
                     "order_type": "market",
                     "exchange": self.exchange,
@@ -140,17 +148,29 @@ class ScalpingStrategy(BaseStrategy):
 
     def on_order_filled(self, order: Dict[str, Any]) -> None:
         side = order.get("side", "")
-        price = order.get("price", 0)
+        filled = order.get("filled") or order.get("amount") or 0
+        # Market/limit fills often report "average" instead of "price", or
+        # neither -- fall back to deriving it from cost/filled.
+        price = order.get("average") or order.get("price")
+        if not price:
+            cost = order.get("cost")
+            if cost and filled:
+                price = cost / filled
+        price = price or 0
+
         if side == "buy":
             self.position = "long"
-            self.entry_price = price
+            self.position_amount += filled
+            if price > 0:
+                self.entry_price = price
             self.entry_time = time.time()
             self.stats["trades_executed"] += 1
         elif side == "sell":
-            if self.entry_price > 0:
+            if self.entry_price > 0 and price > 0:
                 pnl = ((price - self.entry_price) / self.entry_price) * 100
                 self.stats["total_pnl"] += pnl
             self.position = None
+            self.position_amount = 0.0
             self.entry_price = 0.0
             self.entry_time = 0.0
             self.stats["trades_executed"] += 1
