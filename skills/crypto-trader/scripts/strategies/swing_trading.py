@@ -63,6 +63,10 @@ def _macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
 class SwingTradingStrategy(BaseStrategy):
     name = "swing_trading"
     display_name = "Swing Trading"
+    _persist_attrs = (
+        "position", "position_amount", "entry_price",
+        "entry_time", "highest_since_entry",
+    )
 
     def __init__(self, strategy_id: str, params: Dict[str, Any], exchange_manager: Any, risk_manager: Any) -> None:
         super().__init__(strategy_id, params, exchange_manager, risk_manager)
@@ -78,6 +82,7 @@ class SwingTradingStrategy(BaseStrategy):
         self.exchange: str = params.get("exchange", "")
 
         self.position: Optional[str] = None
+        self.position_amount: float = 0.0
         self.entry_price: float = 0.0
         self.entry_time: float = 0.0
         self.highest_since_entry: float = 0.0
@@ -128,7 +133,11 @@ class SwingTradingStrategy(BaseStrategy):
         price = current["close"]
 
         signals: List[Dict[str, Any]] = []
-        amount = self.order_amount_usdt / price if price > 0 else 0
+        buy_amount = self.order_amount_usdt / price if price > 0 else 0
+        # Exits must sell what was actually bought, not a fresh amount
+        # derived from the current price (which drifts from the entry
+        # price over the multi-day hold this strategy is designed for).
+        sell_amount = self.position_amount if self.position_amount > 0 else buy_amount
 
         if self.position == "long":
             hold_days = (time.time() - self.entry_time) / 86400
@@ -136,17 +145,17 @@ class SwingTradingStrategy(BaseStrategy):
                 self.highest_since_entry = price
 
             if self.risk_manager.check_stop_loss(self.entry_price, price):
-                signals.append(self._sell_signal(amount, price, "Stop-loss triggered"))
+                signals.append(self._sell_signal(sell_amount, price, "Stop-loss triggered"))
             elif self.risk_manager.check_trailing_stop(self.highest_since_entry, price):
-                signals.append(self._sell_signal(amount, price, "Trailing stop triggered"))
+                signals.append(self._sell_signal(sell_amount, price, "Trailing stop triggered"))
             elif self.risk_manager.check_take_profit(self.entry_price, price):
-                signals.append(self._sell_signal(amount, price, "Take-profit triggered"))
+                signals.append(self._sell_signal(sell_amount, price, "Take-profit triggered"))
             elif price >= current["bb_upper"]:
-                signals.append(self._sell_signal(amount, price, f"Price at upper BB ({current['bb_upper']:.2f})"))
+                signals.append(self._sell_signal(sell_amount, price, f"Price at upper BB ({current['bb_upper']:.2f})"))
             elif previous["macd_hist"] > 0 and current["macd_hist"] < 0:
-                signals.append(self._sell_signal(amount, price, "MACD histogram crossed below zero"))
+                signals.append(self._sell_signal(sell_amount, price, "MACD histogram crossed below zero"))
             elif hold_days > self.max_hold_days:
-                signals.append(self._sell_signal(amount, price, f"Max hold time ({self.max_hold_days}d) reached"))
+                signals.append(self._sell_signal(sell_amount, price, f"Max hold time ({self.max_hold_days}d) reached"))
 
         else:
             near_lower_bb = price <= current["bb_lower"] * 1.02
@@ -163,7 +172,7 @@ class SwingTradingStrategy(BaseStrategy):
                 signals.append({
                     "symbol": self.symbol,
                     "side": "buy",
-                    "amount": round(amount, 8),
+                    "amount": round(buy_amount, 8),
                     "price": None,
                     "order_type": "market",
                     "exchange": self.exchange,
@@ -191,18 +200,30 @@ class SwingTradingStrategy(BaseStrategy):
 
     def on_order_filled(self, order: Dict[str, Any]) -> None:
         side = order.get("side", "")
-        price = order.get("price", 0)
+        filled = order.get("filled") or order.get("amount") or 0
+        # Market orders often come back without "price"; fall back to the
+        # average fill price or derive it from cost/filled.
+        price = order.get("average") or order.get("price")
+        if not price:
+            cost = order.get("cost")
+            if cost and filled:
+                price = cost / filled
+        price = price or 0
+
         if side == "buy":
             self.position = "long"
-            self.entry_price = price
+            self.position_amount += filled
+            if price > 0:
+                self.entry_price = price
+                self.highest_since_entry = price
             self.entry_time = time.time()
-            self.highest_since_entry = price
             self.stats["trades_executed"] += 1
         elif side == "sell":
-            if self.entry_price > 0:
+            if self.entry_price > 0 and price > 0:
                 pnl = ((price - self.entry_price) / self.entry_price) * 100
                 self.stats["total_pnl"] += pnl
             self.position = None
+            self.position_amount = 0.0
             self.entry_price = 0.0
             self.entry_time = 0.0
             self.highest_since_entry = 0.0
