@@ -202,7 +202,12 @@ class TrendFollowingStrategy(BaseStrategy):
         if self.position == "long" and current_price > self.highest_since_entry:
             self.highest_since_entry = current_price
 
-        if self.position == "long" and self.entry_price > 0:
+        # An exit was already signalled above (bearish cross / RSI
+        # overbought) — don't also evaluate risk-based exits this round,
+        # or the position gets a second sell signal for the same amount.
+        already_exiting = any(s["side"] == "sell" for s in signals)
+
+        if self.position == "long" and self.entry_price > 0 and not already_exiting:
             if self.risk_manager.check_stop_loss(self.entry_price, current_price):
                 signals.append({
                     "symbol": self.symbol,
