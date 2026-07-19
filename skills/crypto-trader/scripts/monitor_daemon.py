@@ -318,6 +318,12 @@ class MonitorDaemon:
                 strategy = strategy_engine.get_strategy_instance(meta["strategy_id"])
                 if strategy is None:
                     continue
+                if meta.get("side") == "buy":
+                    self._handle_buy_fill(
+                        exchange_manager, risk_manager, notifier,
+                        meta["exchange"], meta.get("symbol", ""), order,
+                        strategy.name,
+                    )
                 follow_up = strategy.on_order_filled(order)
                 while follow_up:
                     follow_up.setdefault("strategy_id", meta["strategy_id"])
@@ -508,22 +514,13 @@ class MonitorDaemon:
 
             if order.get("status") in ("closed", "filled"):
                 if side == "buy":
-                    self._place_protective_stop(
+                    self._handle_buy_fill(
                         exchange_manager, risk_manager, notifier,
-                        exchange, symbol, order,
+                        exchange, symbol, order, strategy_name,
+                        confidence=signal_data.get("confidence"),
+                        reason=signal_data.get("reason", ""),
+                        ref_price=ref_price,
                     )
-                    # Catat entry ke Live Learning Engine (fail-open).
-                    if learning_bridge is not None:
-                        entry_px = (order.get("average") or order.get("price")
-                                    or ref_price)
-                        if not entry_px and order.get("cost") and order.get("filled"):
-                            entry_px = order["cost"] / order["filled"]
-                        learning_bridge.record_entry(
-                            symbol, entry_px,
-                            confidence=signal_data.get("confidence"),
-                            ta={"strategy": strategy_name,
-                                "reason": signal_data.get("reason", "")},
-                        )
                 follow_up = strategy.on_order_filled(order)
                 if follow_up:
                     follow_up.setdefault("strategy_id", strategy_id)
@@ -536,6 +533,7 @@ class MonitorDaemon:
                     "strategy_id": strategy_id,
                     "exchange": exchange,
                     "symbol": symbol,
+                    "side": side,
                 }
 
         except Exception as exc:
@@ -564,6 +562,41 @@ class MonitorDaemon:
         except Exception as exc:
             logger.warning("Entry-quality check errored for %s (allowing): %s", symbol, exc)
             return True, "entry-quality check errored -- fail open"
+
+    def _handle_buy_fill(
+        self,
+        exchange_manager: Any,
+        risk_manager: Any,
+        notifier: Any,
+        exchange: str,
+        symbol: str,
+        order: Dict[str, Any],
+        strategy_name: str,
+        confidence: Any = None,
+        reason: str = "",
+        ref_price: Optional[float] = None,
+    ) -> None:
+        """Place the protective stop and record the entry for any BUY fill.
+
+        Shared by both fill paths: an order that closes immediately when
+        placed (_execute_signal) and one that rests (e.g. a limit order from
+        grid/arbitrage) and is only detected filled later by
+        _check_open_orders. Both need the same protection -- a resting buy
+        that fills later is just as unprotected without this as an instant
+        one.
+        """
+        self._place_protective_stop(
+            exchange_manager, risk_manager, notifier, exchange, symbol, order,
+        )
+        # Catat entry ke Live Learning Engine (fail-open).
+        if learning_bridge is not None:
+            entry_px = order.get("average") or order.get("price") or ref_price
+            if not entry_px and order.get("cost") and order.get("filled"):
+                entry_px = order["cost"] / order["filled"]
+            learning_bridge.record_entry(
+                symbol, entry_px, confidence=confidence,
+                ta={"strategy": strategy_name, "reason": reason},
+            )
 
     def _place_protective_stop(
         self,
