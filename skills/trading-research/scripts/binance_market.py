@@ -109,20 +109,20 @@ def format_ticker_output(data):
 def format_orderbook_output(data, depth=10):
     """Format orderbook data for display"""
     print(f"\nOrderbook (Top {depth} levels):")
-    print(f"\n{'Price':<15} {'Bids':<15} {'Asks':<15}")
-    print("-" * 45)
-    
+    print(f"\n{'Bid Price':<15} {'Bid Qty':<15} {'Ask Price':<15} {'Ask Qty':<15}")
+    print("-" * 60)
+
     bids = data['bids'][:depth]
     asks = data['asks'][:depth]
     max_len = max(len(bids), len(asks))
-    
+
     for i in range(max_len):
         bid_price = f"${float(bids[i][0]):,.2f}" if i < len(bids) else ""
         bid_qty = f"{float(bids[i][1]):,.4f}" if i < len(bids) else ""
         ask_price = f"${float(asks[i][0]):,.2f}" if i < len(asks) else ""
         ask_qty = f"{float(asks[i][1]):,.4f}" if i < len(asks) else ""
-        
-        print(f"{bid_price:<15} {bid_qty:<15} {ask_qty:<15}")
+
+        print(f"{bid_price:<15} {bid_qty:<15} {ask_price:<15} {ask_qty:<15}")
 
 def format_trades_output(data, limit=10):
     """Format recent trades for display"""
