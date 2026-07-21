@@ -139,11 +139,18 @@ class Notifier:
                 f"Reason: {data.get('reason', 'N/A')}",
             ])
         elif alert_type == "risk_limit_hit":
-            lines.extend([
-                f"Type: {data.get('type', 'N/A')}",
-                f"Current: {data.get('current_loss', 0):.2f} EUR",
-                f"Limit: {data.get('limit', 0):.2f} EUR",
-            ])
+            if data.get("type") == "drawdown_warning":
+                lines.extend([
+                    f"Type: {data.get('type', 'N/A')}",
+                    f"Current drawdown: {data.get('current_drawdown_pct', 0):.1f}%",
+                    f"Limit: {data.get('limit_pct', 0):.1f}%",
+                ])
+            else:
+                lines.extend([
+                    f"Type: {data.get('type', 'N/A')}",
+                    f"Current: {data.get('current_loss', 0):.2f} EUR",
+                    f"Limit: {data.get('limit', 0):.2f} EUR",
+                ])
         elif alert_type == "emergency_stop":
             lines.extend([
                 "ALL TRADING HALTED",
