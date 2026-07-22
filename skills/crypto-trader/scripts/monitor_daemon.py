@@ -395,6 +395,12 @@ class MonitorDaemon:
 
         if max_drawdown and drawdown >= max_drawdown * 0.8:
             logger.warning("Approaching drawdown limit: %.1f%% / %.1f%%", drawdown, max_drawdown)
+            if notifier:
+                notifier.send_alert("risk_limit_hit", {
+                    "type": "drawdown_warning",
+                    "current_drawdown_pct": drawdown,
+                    "limit_pct": max_drawdown,
+                })
 
     def _evaluate_strategies(
         self,
