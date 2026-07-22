@@ -22,6 +22,26 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _BACKTESTS_DIR = _PROJECT_ROOT / "data" / "backtests"
 
 
+def _calculate_rsi(series: "pd.Series", period: int) -> "pd.Series":
+    """Wilder RSI. Matches strategies/trend_following.py's _calculate_rsi.
+
+    avg_loss == 0 means pure gains: RSI is 100 (not 0, which a naive
+    avg_loss.replace(0, inf) division produces). Flat (both zero) = neutral 50.
+    """
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+
+    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
+    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
+
+    rs = avg_gain / avg_loss
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi = rsi.where(avg_loss != 0, 100.0)
+    rsi = rsi.where((avg_loss != 0) | (avg_gain != 0), 50.0)
+    return rsi
+
+
 class SimulatedOrder:
     """Represents a simulated order during backtesting."""
 
@@ -283,13 +303,7 @@ class Backtester:
         df["ema_short"] = df["close"].ewm(span=ema_short_p, adjust=False).mean()
         df["ema_long"] = df["close"].ewm(span=ema_long_p, adjust=False).mean()
 
-        delta = df["close"].diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = (-delta).where(delta < 0, 0.0)
-        avg_gain = gain.ewm(com=rsi_period - 1, min_periods=rsi_period).mean()
-        avg_loss = loss.ewm(com=rsi_period - 1, min_periods=rsi_period).mean()
-        rs = avg_gain / avg_loss.replace(0, float("inf"))
-        df["rsi"] = 100.0 - (100.0 / (1.0 + rs))
+        df["rsi"] = _calculate_rsi(df["close"], rsi_period)
 
         balance_usdt = self.initial_balance
         balance_crypto = 0.0
