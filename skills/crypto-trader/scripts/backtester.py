@@ -387,9 +387,9 @@ class Backtester:
         running = self.initial_balance
         for order in orders:
             if order["side"] == "buy":
-                running -= order["cost"]
+                running -= (order["cost"] + order["fee"])
             else:
-                running += order["cost"]
+                running += (order["cost"] - order["fee"])
             equity_curve.append(running)
 
         max_drawdown = 0.0
