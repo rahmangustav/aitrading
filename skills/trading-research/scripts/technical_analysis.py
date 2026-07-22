@@ -45,18 +45,25 @@ def calculate_sma(prices, period):
         return None
     return mean(prices[-period:])
 
-def calculate_ema(prices, period):
-    """Calculate Exponential Moving Average"""
+def calculate_ema_series(prices, period):
+    """Calculate the full EMA series, seeded with SMA(period) as the first value"""
     if len(prices) < period:
-        return None
-    
+        return []
+
     multiplier = 2 / (period + 1)
     ema = mean(prices[:period])  # Start with SMA
-    
+    series = [ema]
+
     for price in prices[period:]:
         ema = (price - ema) * multiplier + ema
-    
-    return ema
+        series.append(ema)
+
+    return series
+
+def calculate_ema(prices, period):
+    """Calculate Exponential Moving Average (latest value)"""
+    series = calculate_ema_series(prices, period)
+    return series[-1] if series else None
 
 def calculate_rsi(prices, period=14):
     """Calculate Relative Strength Index"""
@@ -87,23 +94,26 @@ def calculate_rsi(prices, period=14):
     return rsi
 
 def calculate_macd(prices, fast=12, slow=26, signal=9):
-    """Calculate MACD (Moving Average Convergence Divergence)"""
-    if len(prices) < slow:
+    """Calculate MACD (Moving Average Convergence Divergence): line, signal, histogram"""
+    if len(prices) < slow + signal - 1:
         return None, None, None
-    
-    ema_fast = calculate_ema(prices, fast)
-    ema_slow = calculate_ema(prices, slow)
-    
-    if ema_fast is None or ema_slow is None:
+
+    ema_fast_series = calculate_ema_series(prices, fast)
+    ema_slow_series = calculate_ema_series(prices, slow)
+
+    # ema_fast_series starts (slow - fast) points earlier than ema_slow_series;
+    # align both series on the same price index before diffing.
+    offset = slow - fast
+    macd_series = [f - s for f, s in zip(ema_fast_series[offset:], ema_slow_series)]
+
+    signal_series = calculate_ema_series(macd_series, signal)
+    if not signal_series:
         return None, None, None
-    
-    macd_line = ema_fast - ema_slow
-    
-    # Calculate signal line (EMA of MACD)
-    # Simplified: using last value as approximation
-    signal_line = macd_line  # In production, would track MACD history
+
+    macd_line = macd_series[-1]
+    signal_line = signal_series[-1]
     histogram = macd_line - signal_line
-    
+
     return macd_line, signal_line, histogram
 
 def calculate_bollinger_bands(prices, period=20, std_dev=2):
