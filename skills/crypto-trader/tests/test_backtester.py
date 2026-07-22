@@ -91,8 +91,8 @@ class TestComputeMetrics:
         bt = Backtester(exchange_manager=None, initial_balance=1000.0, fee_pct=0.0, slippage_pct=0.0)
         ohlcv = _candles([100.0, 110.0])
         orders = [
-            {"side": "buy", "cost": 100.0},
-            {"side": "sell", "cost": 120.0},
+            {"side": "buy", "cost": 100.0, "fee": 0.0},
+            {"side": "sell", "cost": 120.0, "fee": 0.0},
         ]
         metrics = bt._compute_metrics(final_value=1020.0, orders=orders, total_fees=0.0, wins=1, losses=0, ohlcv=ohlcv)
         assert metrics["total_return_pct"] == 2.0
@@ -111,8 +111,8 @@ class TestComputeMetrics:
         bt = Backtester(exchange_manager=None, initial_balance=1000.0)
         ohlcv = _candles([100.0, 90.0])
         orders = [
-            {"side": "buy", "cost": 500.0},
-            {"side": "sell", "cost": 400.0},
+            {"side": "buy", "cost": 500.0, "fee": 0.0},
+            {"side": "sell", "cost": 400.0, "fee": 0.0},
         ]
         metrics = bt._compute_metrics(final_value=900.0, orders=orders, total_fees=0.0, wins=0, losses=1, ohlcv=ohlcv)
         assert metrics["max_drawdown_pct"] > 0
