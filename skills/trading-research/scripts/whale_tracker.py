@@ -51,8 +51,8 @@ def analyze_large_trades(trades, threshold_percentile=90):
         threshold_percentile: Percentile for defining "large" trades
     """
     if not trades:
-        return []
-    
+        return [], 0
+
     # Calculate trade sizes
     trade_sizes = [float(t['qty']) * float(t['price']) for t in trades]
     
