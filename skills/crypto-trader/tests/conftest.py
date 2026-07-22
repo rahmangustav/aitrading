@@ -2,7 +2,7 @@
 (and auto-restore) if any test writes to the REAL production learning-engine
 files under `.learnings/trading/` instead of a mocked/tmp path.
 
-Why this exists: `ct_signal_db.json` backs the live winrate numbers quoted in
+Why this exists: `signal_db.json` backs the live winrate numbers quoted in
 VERDICT.md/MEMORY.md that gate real-money trading (winrate >=60%). This exact
 class of bug -- a test that forgets to mock `learning_bridge` and lets the
 real `learn_live` module run, silently appending fake signals to that file --
@@ -22,8 +22,8 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _LEARN_DIR = _REPO_ROOT / ".learnings" / "trading"
 _GUARDED_FILES = [
-    _LEARN_DIR / "ct_signal_db.json",
-    _LEARN_DIR / "ACCURACY_crypto_trader.md",
+    _LEARN_DIR / "signal_db.json",
+    _LEARN_DIR / "ACCURACY.md",
 ]
 
 
