@@ -33,6 +33,12 @@ jobs:
 
       - name: Run Claude Code Review
         id: claude-review
+        # continue-on-error: repo secret CLAUDE_CODE_OAUTH_TOKEN is unset/invalid,
+        # so this step has failed on every PR since at least 2026-07-18. Without
+        # continue-on-error, that shows as a red "claude-review" check on every
+        # PR regardless of code quality, which is misleading. Remove
+        # continue-on-error once the secret is set/rotated in repo settings.
+        continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
