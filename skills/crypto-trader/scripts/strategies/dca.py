@@ -122,12 +122,14 @@ class DCAStrategy(BaseStrategy):
 
     def on_order_filled(self, order: Dict[str, Any]) -> None:
         """Update DCA stats after a buy order fills."""
-        price = (
-            order.get("average")
-            or order.get("price")
-            or order.get("cost", 0) / max(order.get("amount") or 0, 1e-8)
-        )
         amount = order.get("filled") or order.get("amount") or 0
+        # Market orders often come back without "price"; fall back to the
+        # average fill price or derive it from cost/filled (not cost/amount --
+        # "amount" is the requested size, which can differ from what actually
+        # filled on a partial fill and would skew avg_price / total_invested).
+        price = order.get("average") or order.get("price") or (
+            order.get("cost", 0) / max(amount, 1e-8)
+        )
         cost = order.get("cost") or (price * amount)
 
         self.total_invested += cost
