@@ -134,3 +134,15 @@ class TestCalculateLumpSumComparison:
     def test_flat_price_gives_zero_return(self):
         result = calculate_lump_sum_comparison(500.0, 20.0, 20.0)
         assert result["return_pct"] == pytest.approx(0.0)
+
+    def test_zero_start_price_raises(self):
+        with pytest.raises(ValueError):
+            calculate_lump_sum_comparison(1000.0, 0.0, 150.0)
+
+    def test_negative_start_price_raises(self):
+        with pytest.raises(ValueError):
+            calculate_lump_sum_comparison(1000.0, -100.0, 150.0)
+
+    def test_zero_total_amount_raises(self):
+        with pytest.raises(ValueError):
+            calculate_lump_sum_comparison(0.0, 100.0, 150.0)

@@ -100,6 +100,12 @@ def simulate_dca_returns(schedule, price_history):
 
 def calculate_lump_sum_comparison(total_amount, start_price, end_price):
     """Compare DCA to lump sum investment"""
+    if start_price <= 0:
+        raise ValueError("Start price must be positive")
+
+    if total_amount <= 0:
+        raise ValueError("Total amount must be positive")
+
     lump_sum_units = total_amount / start_price
     lump_sum_value = lump_sum_units * end_price
     lump_sum_return = ((lump_sum_value - total_amount) / total_amount) * 100
