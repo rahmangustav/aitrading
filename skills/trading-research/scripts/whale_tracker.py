@@ -205,18 +205,24 @@ def format_orderbook_output(analysis, current_price):
         print(f"  {'Price':<15} {'Size':<15} {'Distance from Current':<20}")
         print(f"  {'-'*50}")
         for wall in analysis['bid_walls'][:5]:
-            distance = ((current_price - wall['price']) / current_price) * 100
-            print(f"  ${wall['price']:<14,.2f} {wall['size']:<14,.4f} {distance:>18.2f}%")
+            if current_price > 0:
+                distance_str = f"{((current_price - wall['price']) / current_price) * 100:>18.2f}%"
+            else:
+                distance_str = f"{'N/A':>19}"
+            print(f"  ${wall['price']:<14,.2f} {wall['size']:<14,.4f} {distance_str}")
     else:
         print(f"  No significant bid walls detected")
-    
+
     if analysis['ask_walls']:
         print(f"\n  Resistance Walls (Large Asks):")
         print(f"  {'Price':<15} {'Size':<15} {'Distance from Current':<20}")
         print(f"  {'-'*50}")
         for wall in analysis['ask_walls'][:5]:
-            distance = ((wall['price'] - current_price) / current_price) * 100
-            print(f"  ${wall['price']:<14,.2f} {wall['size']:<14,.4f} {distance:>18.2f}%")
+            if current_price > 0:
+                distance_str = f"{((wall['price'] - current_price) / current_price) * 100:>18.2f}%"
+            else:
+                distance_str = f"{'N/A':>19}"
+            print(f"  ${wall['price']:<14,.2f} {wall['size']:<14,.4f} {distance_str}")
     else:
         print(f"  No significant ask walls detected")
     
