@@ -1,10 +1,10 @@
 """Tests for the pair/parameter selection logic feeding the winrate-gate harness.
 
-validate_mr.py / validate_tf.py decide WHICH pairs and parameter sets get
-backtested to produce the numbers in VERDICT.md (the >=60% winrate gate that
-blocks real-money trading). Neither top_liquid_pairs() nor build_param_sets()
-had any test coverage before this file, despite being the selection logic
-upstream of every number in that report.
+validate_mr.py / validate_tf.py / validate_csm.py decide WHICH pairs and
+parameter sets get backtested to produce the numbers in VERDICT.md (the
+>=60% winrate gate that blocks real-money trading). None of top_liquid_pairs()
+or the three build_param_sets() had any test coverage before this file,
+despite being the selection logic upstream of every number in that report.
 """
 import sys
 from pathlib import Path
@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from validate_mr import top_liquid_pairs  # noqa: E402
 from validate_tf import build_param_sets  # noqa: E402
+from validate_csm import build_param_sets as build_param_sets_csm  # noqa: E402
 
 
 class _FakeExchange:
@@ -114,3 +115,34 @@ class TestBuildParamSets:
         sets = build_param_sets(grid=True)
         adx = next(s for s in sets if "adx_trend_threshold" in s)
         assert adx["adx_trend_threshold"] == 25
+
+
+class TestBuildParamSetsCsm:
+    def test_no_grid_returns_single_live_param_set(self):
+        sets = build_param_sets_csm(grid=False)
+        assert len(sets) == 1
+        assert sets[0]["lookback_bars"] == 30
+        assert sets[0]["hold_bars"] == 30
+        assert sets[0]["top_k"] == 3
+
+    def test_grid_returns_six_variants_with_unique_labels(self):
+        sets = build_param_sets_csm(grid=True)
+        assert len(sets) == 6
+        labels = [s["label"] for s in sets]
+        assert len(labels) == len(set(labels))
+
+    def test_grid_first_variant_matches_live_params(self):
+        sets = build_param_sets_csm(grid=True)
+        live = sets[0]
+        assert live["lookback_bars"] == 30
+        assert live["hold_bars"] == 30
+        assert live["top_k"] == 3
+
+    def test_grid_varies_lookback_hold_and_top_k_independently(self):
+        sets = build_param_sets_csm(grid=True)
+        lookbacks = {s["lookback_bars"] for s in sets}
+        holds = {s["hold_bars"] for s in sets}
+        top_ks = {s["top_k"] for s in sets}
+        assert lookbacks == {14, 30, 60}
+        assert holds == {7, 14, 30}
+        assert top_ks == {1, 3, 5}
