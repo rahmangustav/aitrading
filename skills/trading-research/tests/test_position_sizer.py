@@ -110,3 +110,15 @@ class TestCalculateLadderStrategy:
     def test_default_num_levels_is_3(self):
         levels = calculate_ladder_strategy(3.0)
         assert len(levels) == 3
+
+    def test_zero_num_levels_raises_instead_of_zerodivisionerror(self):
+        with pytest.raises(ValueError, match="levels"):
+            calculate_ladder_strategy(1.0, num_levels=0)
+
+    def test_negative_num_levels_raises(self):
+        with pytest.raises(ValueError, match="levels"):
+            calculate_ladder_strategy(1.0, num_levels=-2)
+
+    def test_zero_position_size_raises_instead_of_zerodivisionerror(self):
+        with pytest.raises(ValueError, match="Position size"):
+            calculate_ladder_strategy(0.0, num_levels=3)
