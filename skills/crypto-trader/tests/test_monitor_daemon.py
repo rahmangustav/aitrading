@@ -37,6 +37,18 @@ def _daemon(**attrs):
     return daemon
 
 
+@pytest.fixture(autouse=True)
+def _no_real_learning_bridge(monkeypatch):
+    """A filled BUY order makes _execute_signal call learning_bridge.record_entry(),
+    which -- unless mocked -- writes a real signal into the on-disk
+    .learnings/trading/ct_signal_db.json that VERDICT.md's live winrate track
+    record is built from. This file's tests don't exercise learning_bridge
+    behaviour (that's covered by test_monitor_daemon_order_registry.py's
+    FakeLearningBridge), so disable it here to stop every run of this suite
+    from polluting production signal data with fake BTC/USDT@30000 entries."""
+    monkeypatch.setattr(monitor_daemon, "learning_bridge", None)
+
+
 class FakeNotifier:
     def __init__(self):
         self.alerts = []
