@@ -262,11 +262,23 @@ class TestStopLoss:
     def test_stop_loss_does_not_trigger(self, risk_manager):
         assert risk_manager.check_stop_loss(entry_price=100, current_price=97) is False
 
+    def test_stop_loss_zero_entry_price_returns_false_not_zerodivisionerror(self, risk_manager):
+        # A strategy can end up with entry_price == 0 if the exchange's order-fill
+        # response was missing average/price/cost (see swing_trading.on_order_filled).
+        # This must not crash the strategy's evaluate() cycle every time it runs.
+        assert risk_manager.check_stop_loss(entry_price=0, current_price=94) is False
+
+    def test_stop_loss_negative_entry_price_returns_false(self, risk_manager):
+        assert risk_manager.check_stop_loss(entry_price=-5, current_price=94) is False
+
     def test_trailing_stop_triggers(self, risk_manager):
         assert risk_manager.check_trailing_stop(highest_price=110, current_price=106) is True
 
     def test_trailing_stop_does_not_trigger(self, risk_manager):
         assert risk_manager.check_trailing_stop(highest_price=110, current_price=108) is False
+
+    def test_trailing_stop_zero_highest_price_returns_false(self, risk_manager):
+        assert risk_manager.check_trailing_stop(highest_price=0, current_price=106) is False
 
     def test_check_stop_loss_disabled_never_triggers(self, tmp_path):
         rm = _make_risk_manager(tmp_path, {"stop_loss": {"enabled": False}})
@@ -304,9 +316,15 @@ class TestTakeProfit:
     def test_take_profit_does_not_trigger(self, risk_manager):
         assert risk_manager.check_take_profit(entry_price=100, current_price=108) is False
 
+    def test_take_profit_zero_entry_price_returns_false_not_zerodivisionerror(self, risk_manager):
+        assert risk_manager.check_take_profit(entry_price=0, current_price=111) is False
+
     def test_partial_take_profit(self, risk_manager):
         fraction = risk_manager.check_partial_take_profit(entry_price=100, current_price=106)
         assert fraction == 0.5
+
+    def test_partial_take_profit_zero_entry_price_returns_none(self, risk_manager):
+        assert risk_manager.check_partial_take_profit(entry_price=0, current_price=106) is None
 
     def test_partial_take_profit_below_trigger_returns_none(self, risk_manager):
         assert risk_manager.check_partial_take_profit(entry_price=100, current_price=102) is None
