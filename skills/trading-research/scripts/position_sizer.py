@@ -98,6 +98,12 @@ def calculate_ladder_strategy(position_size, num_levels=3):
         position_size: Total position size
         num_levels: Number of levels to split into
     """
+    if num_levels <= 0:
+        raise ValueError("Number of levels must be positive")
+
+    if position_size <= 0:
+        raise ValueError("Position size must be positive")
+
     size_per_level = position_size / num_levels
     
     levels = []
