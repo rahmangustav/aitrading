@@ -245,7 +245,8 @@ def analyze(klines, rsi_period=14, bb_period=20, show_all=False):
     
     print(f"\n{'Bollinger Bands:':<30}")
     if bb_upper:
-        bb_position = ((current_price - bb_lower) / (bb_upper - bb_lower)) * 100
+        band_width = bb_upper - bb_lower
+        bb_position = ((current_price - bb_lower) / band_width) * 100 if band_width else 50.0
         print(f"  Upper: ${bb_upper:,.2f}")
         print(f"  Middle: ${bb_middle:,.2f}")
         print(f"  Lower: ${bb_lower:,.2f}")

@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 from technical_analysis import (
+    analyze,
     analyze_volume,
     calculate_bollinger_bands,
     calculate_ema,
@@ -185,3 +186,69 @@ class TestTrendSignal:
     def test_uptrend_without_enough_data_for_sma50(self):
         prices = [100 + i for i in range(25)]
         assert get_trend_signal(prices) == "Uptrend"
+
+
+class TestAnalyze:
+    """analyze() aggregates every indicator above into the signal dict that
+    technical_analysis.py's CLI (and callers via --json) actually returns.
+    It had zero coverage even though the pure indicator functions did.
+    """
+
+    def test_flat_price_data_does_not_crash_on_zero_width_bollinger_band(self, capsys):
+        # Regression: when every close in the BB period is identical, stdev
+        # is 0 so bb_upper == bb_lower. The old code computed
+        # (price - bb_lower) / (bb_upper - bb_lower) unconditionally, which
+        # raised ZeroDivisionError for any flat/no-movement pair (e.g. a
+        # stablecoin pair, or a low-liquidity symbol with a stale kline feed)
+        # instead of returning a result.
+        klines = [
+            {"close": 100.0, "high": 100.0, "low": 100.0, "volume": 1000.0}
+            for _ in range(60)
+        ]
+        result = analyze(klines)
+        assert result["bollinger_bands"] == {"upper": 100.0, "middle": 100.0, "lower": 100.0}
+        capsys.readouterr()
+
+    def test_returns_expected_shape_and_values_for_trending_data(self, capsys):
+        prices = [100 + i * 0.5 + 10 * math.sin(i / 5) for i in range(80)]
+        klines = [
+            {"close": c, "high": c + 1, "low": c - 1, "volume": 1000.0 + i}
+            for i, c in enumerate(prices)
+        ]
+        result = analyze(klines)
+        capsys.readouterr()
+
+        assert result["price"] == prices[-1]
+        assert result["sma_20"] == calculate_sma(prices, 20)
+        assert result["rsi"] == calculate_rsi(prices, 14)
+        assert result["macd"]["line"] == calculate_macd(prices)[0]
+        assert result["bollinger_bands"]["upper"] == calculate_bollinger_bands(prices, 20)[0]
+        assert result["support"] and result["resistance"]
+        assert result["volume"]["current"] == klines[-1]["volume"]
+        assert isinstance(result["signals"], list)
+
+    def test_insufficient_history_omits_indicators_instead_of_crashing(self, capsys):
+        # Fewer than 20 candles: SMA(20)/BB/volume/support-resistance/trend
+        # all fall back to None/"Insufficient data" rather than raising.
+        klines = [
+            {"close": 100.0 + i, "high": 101.0 + i, "low": 99.0 + i, "volume": 500.0}
+            for i in range(10)
+        ]
+        result = analyze(klines)
+        capsys.readouterr()
+
+        assert result["sma_20"] is None
+        assert result["bollinger_bands"] == {"upper": None, "middle": None, "lower": None}
+        assert result["volume"] is None
+        assert result["trend"] == "Insufficient data"
+
+    def test_overbought_rsi_produces_a_warning_signal(self, capsys):
+        # Monotonically rising prices for the whole window -> every change is
+        # a gain -> RSI 100 -> the overbought warning must be in `signals`.
+        prices = [100 + i for i in range(30)]
+        klines = [{"close": c, "high": c, "low": c, "volume": 1000.0} for c in prices]
+        result = analyze(klines)
+        capsys.readouterr()
+
+        assert result["rsi"] == 100
+        assert any("overbought" in s.lower() for s in result["signals"])
