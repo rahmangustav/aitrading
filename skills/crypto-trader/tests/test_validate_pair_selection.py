@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from validate_mr import top_liquid_pairs  # noqa: E402
+from validate_mr import fetch_ohlcv, top_liquid_pairs  # noqa: E402
 from validate_tf import build_param_sets  # noqa: E402
 from validate_csm import build_param_sets as build_param_sets_csm  # noqa: E402
 
@@ -115,6 +115,100 @@ class TestBuildParamSets:
         sets = build_param_sets(grid=True)
         adx = next(s for s in sets if "adx_trend_threshold" in s)
         assert adx["adx_trend_threshold"] == 25
+
+
+def _candle(ts):
+    return [ts, 1, 2, 3, 4, 5]
+
+
+class _FakeOhlcvExchange:
+    """Fake ccxt exchange for fetch_ohlcv() pagination tests.
+
+    `pages` is consumed one fetch_ohlcv() call at a time, in order.
+    """
+
+    def __init__(self, pages, now_ms, ms_per_candle=3_600_000, rate_limit_ms=100):
+        self._pages = list(pages)
+        self._now_ms = now_ms
+        self._ms_per_candle = ms_per_candle
+        self.rateLimit = rate_limit_ms
+        self.calls = []
+
+    def parse_timeframe(self, timeframe):
+        return self._ms_per_candle // 1000
+
+    def milliseconds(self):
+        return self._now_ms
+
+    def fetch_ohlcv(self, symbol, timeframe, since, limit):
+        self.calls.append({"symbol": symbol, "timeframe": timeframe, "since": since, "limit": limit})
+        if not self._pages:
+            return []
+        return self._pages.pop(0)
+
+
+class TestFetchOhlcv:
+    """fetch_ohlcv() feeds every backtest in validate_mr.py/validate_tf.py --
+    a pagination bug here (infinite loop, or silently truncated history)
+    would corrupt every number downstream in VERDICT.md without any crash
+    to flag it. Had zero test coverage before this class.
+    """
+
+    def test_single_short_batch_stops_immediately(self):
+        page = [_candle(1_000_000 + i * 3_600_000) for i in range(3)]
+        ex = _FakeOhlcvExchange(pages=[page], now_ms=100_000_000_000)
+        result = fetch_ohlcv(ex, "BTC/USDT", "1h", months=1)
+        assert result == page
+        assert len(ex.calls) == 1
+
+    def test_empty_first_batch_returns_empty_list(self):
+        ex = _FakeOhlcvExchange(pages=[[]], now_ms=100_000_000_000)
+        assert fetch_ohlcv(ex, "BTC/USDT", "1h", months=1) == []
+
+    def test_paginates_across_full_batch_into_short_final_batch(self):
+        start = 1_000_000
+        ms_per_candle = 3_600_000
+        page1 = [_candle(start + i * ms_per_candle) for i in range(1000)]
+        page2_start = page1[-1][0] + ms_per_candle
+        page2 = [_candle(page2_start + i * ms_per_candle) for i in range(500)]
+        ex = _FakeOhlcvExchange(pages=[page1, page2], now_ms=page2_start + 1000 * ms_per_candle)
+
+        result = fetch_ohlcv(ex, "BTC/USDT", "1h", months=6)
+
+        assert result == page1 + page2
+        assert len(ex.calls) == 2
+        assert ex.calls[1]["since"] == page2_start
+
+    def test_stops_when_next_since_would_exceed_now_even_on_full_batch(self):
+        start = 1_000_000
+        ms_per_candle = 3_600_000
+        page1 = [_candle(start + i * ms_per_candle) for i in range(1000)]
+        next_since = page1[-1][0] + ms_per_candle
+        # `now` sits before the next window would start -> must stop even
+        # though the batch came back full (len == limit).
+        ex = _FakeOhlcvExchange(pages=[page1, [_candle(next_since)] * 10], now_ms=next_since - 1)
+
+        result = fetch_ohlcv(ex, "BTC/USDT", "1h", months=6)
+
+        assert result == page1
+        assert len(ex.calls) == 1
+
+    def test_sleeps_between_pages_but_not_after_final_page(self, monkeypatch):
+        import validate_mr
+
+        start = 1_000_000
+        ms_per_candle = 3_600_000
+        page1 = [_candle(start + i * ms_per_candle) for i in range(1000)]
+        page2_start = page1[-1][0] + ms_per_candle
+        page2 = [_candle(page2_start + i * ms_per_candle) for i in range(500)]
+        ex = _FakeOhlcvExchange(pages=[page1, page2], now_ms=page2_start + 1000 * ms_per_candle)
+
+        sleep_calls = []
+        monkeypatch.setattr(validate_mr.time, "sleep", lambda secs: sleep_calls.append(secs))
+
+        fetch_ohlcv(ex, "BTC/USDT", "1h", months=6)
+
+        assert sleep_calls == [ex.rateLimit / 1000]
 
 
 class TestBuildParamSetsCsm:
