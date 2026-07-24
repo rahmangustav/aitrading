@@ -9,11 +9,25 @@ despite being the selection logic upstream of every number in that report.
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from validate_mr import fetch_ohlcv, top_liquid_pairs  # noqa: E402
+from validate_mr import aggregate_by_param, fetch_ohlcv, top_liquid_pairs  # noqa: E402
 from validate_tf import build_param_sets  # noqa: E402
 from validate_csm import build_param_sets as build_param_sets_csm  # noqa: E402
+
+
+def _row(symbol, label, wins, losses, total_return_pct, avg_win_pct=0.0, avg_loss_pct=0.0):
+    return {
+        "symbol": symbol,
+        "params": label,
+        "wins": wins,
+        "losses": losses,
+        "total_return_pct": total_return_pct,
+        "avg_win_pct": avg_win_pct,
+        "avg_loss_pct": avg_loss_pct,
+    }
 
 
 class _FakeExchange:
@@ -115,6 +129,81 @@ class TestBuildParamSets:
         sets = build_param_sets(grid=True)
         adx = next(s for s in sets if "adx_trend_threshold" in s)
         assert adx["adx_trend_threshold"] == 25
+
+
+class TestAggregateByParam:
+    """aggregate_by_param() produces the "AGREGAT per parameter" rows --
+    the last step before a param set is declared LOLOS-GATE/win-rate-OK in
+    validate_mr.py and validate_tf.py's output, so a bug here misreports the
+    exact number VERDICT.md quotes for the real-money gate.
+    """
+
+    def test_single_symbol_single_label(self):
+        rows = [_row("BTC/USDT", "base", wins=7, losses=3, total_return_pct=12.5)]
+        agg = aggregate_by_param(rows)
+        assert len(agg) == 1
+        assert agg[0]["label"] == "base"
+        assert agg[0]["trades"] == 10
+        assert agg[0]["wins"] == 7
+        assert agg[0]["losses"] == 3
+        assert agg[0]["win_rate_pct"] == 70.0
+        assert agg[0]["total_return_pct"] == 12.5
+
+    def test_sums_across_symbols_for_same_label(self):
+        rows = [
+            _row("BTC/USDT", "base", wins=6, losses=4, total_return_pct=10.0),
+            _row("ETH/USDT", "base", wins=3, losses=7, total_return_pct=-5.0),
+        ]
+        agg = aggregate_by_param(rows)
+        assert len(agg) == 1
+        assert agg[0]["trades"] == 20
+        assert agg[0]["wins"] == 9
+        assert agg[0]["losses"] == 11
+        assert agg[0]["win_rate_pct"] == 45.0
+        assert agg[0]["total_return_pct"] == 5.0
+
+    def test_keeps_labels_separate_and_sorted(self):
+        rows = [
+            _row("BTC/USDT", "zeta", wins=1, losses=0, total_return_pct=1.0),
+            _row("BTC/USDT", "alpha", wins=1, losses=0, total_return_pct=1.0),
+        ]
+        agg = aggregate_by_param(rows)
+        assert [a["label"] for a in agg] == ["alpha", "zeta"]
+
+    def test_zero_trades_win_rate_is_zero_not_a_crash(self):
+        rows = [_row("BTC/USDT", "base", wins=0, losses=0, total_return_pct=0.0)]
+        agg = aggregate_by_param(rows)
+        assert agg[0]["trades"] == 0
+        assert agg[0]["win_rate_pct"] == 0
+        assert agg[0]["profit_factor"] == 0
+
+    def test_profit_factor_weighted_by_win_loss_counts(self):
+        # gross win = 3 wins * 2.0 avg = 6.0 ; gross loss = 2 losses * -1.0 avg = 2.0
+        # -> PF = 6.0 / 2.0 = 3.0
+        rows = [_row("BTC/USDT", "base", wins=3, losses=2, total_return_pct=4.0,
+                     avg_win_pct=2.0, avg_loss_pct=-1.0)]
+        agg = aggregate_by_param(rows)
+        assert agg[0]["profit_factor"] == pytest.approx(3.0)
+
+    def test_profit_factor_zero_when_no_losses(self):
+        rows = [_row("BTC/USDT", "base", wins=5, losses=0, total_return_pct=8.0,
+                     avg_win_pct=1.5, avg_loss_pct=0.0)]
+        agg = aggregate_by_param(rows)
+        assert agg[0]["profit_factor"] == 0
+
+    def test_profit_factor_aggregates_across_symbols(self):
+        rows = [
+            _row("BTC/USDT", "base", wins=2, losses=1, total_return_pct=1.0,
+                 avg_win_pct=1.0, avg_loss_pct=-1.0),
+            _row("ETH/USDT", "base", wins=2, losses=1, total_return_pct=1.0,
+                 avg_win_pct=1.0, avg_loss_pct=-1.0),
+        ]
+        agg = aggregate_by_param(rows)
+        # gross win = (2*1.0) + (2*1.0) = 4.0 ; gross loss = |(1*-1.0)+(1*-1.0)| = 2.0
+        assert agg[0]["profit_factor"] == pytest.approx(2.0)
+
+    def test_empty_results_returns_empty_list(self):
+        assert aggregate_by_param([]) == []
 
 
 def _candle(ts):

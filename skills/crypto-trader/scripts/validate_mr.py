@@ -66,6 +66,38 @@ def fetch_ohlcv(exchange, symbol: str, timeframe: str, months: int) -> list:
     return out
 
 
+def aggregate_by_param(all_results: list) -> list:
+    """Roll up per-symbol backtest rows into one summary row per param label.
+
+    Shared by validate_mr.py and validate_tf.py's "AGREGAT per parameter"
+    step -- both weight win-rate/profit-factor across every symbol that
+    used the same param set, and both feed the >=60% win-rate fund gate,
+    so the two copies had to stay byte-for-byte identical by hand. Extracted
+    here so there is exactly one implementation to test and keep correct.
+    """
+    out = []
+    for label in sorted({r["params"] for r in all_results}):
+        rows = [r for r in all_results if r["params"] == label]
+        tw = sum(r["wins"] for r in rows)
+        tl = sum(r["losses"] for r in rows)
+        tot = tw + tl
+        wr = tw / tot * 100 if tot else 0
+        ret = sum(r["total_return_pct"] for r in rows)
+        pf_num = sum(r["avg_win_pct"] * r["wins"] for r in rows)
+        pf_den = abs(sum(r["avg_loss_pct"] * r["losses"] for r in rows))
+        pf = pf_num / pf_den if pf_den else 0
+        out.append({
+            "label": label,
+            "trades": tot,
+            "wins": tw,
+            "losses": tl,
+            "win_rate_pct": wr,
+            "total_return_pct": ret,
+            "profit_factor": pf,
+        })
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pairs", nargs="*", default=DEFAULT_PAIRS)
@@ -126,16 +158,10 @@ def main() -> None:
 
     # Aggregate per param set
     print("\n=== AGREGAT per parameter (semua pair) ===")
-    labels = {r["params"] for r in all_results}
-    for label in sorted(labels):
-        rows = [r for r in all_results if r["params"] == label]
-        tw = sum(r["wins"] for r in rows)
-        tl = sum(r["losses"] for r in rows)
-        tot = tw + tl
-        wr = tw / tot * 100 if tot else 0
-        ret = sum(r["total_return_pct"] for r in rows)
-        print(f"  {label:38s} trades={tot:4d} WR={wr:5.1f}% sum_ret={ret:+8.2f}%  "
-              f"{'>=60% GATE OK' if wr >= 60 else 'belum lolos gate'}")
+    for agg in aggregate_by_param(all_results):
+        print(f"  {agg['label']:38s} trades={agg['trades']:4d} WR={agg['win_rate_pct']:5.1f}% "
+              f"sum_ret={agg['total_return_pct']:+8.2f}%  "
+              f"{'>=60% GATE OK' if agg['win_rate_pct'] >= 60 else 'belum lolos gate'}")
 
     if args.json:
         out = Path(__file__).resolve().parent.parent / "data" / "backtests"

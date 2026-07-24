@@ -20,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ccxt  # noqa: E402
 
 from tf_backtest import backtest_trend_following  # noqa: E402
-from validate_mr import DEFAULT_PAIRS, fetch_ohlcv, top_liquid_pairs  # noqa: E402
+from validate_mr import (  # noqa: E402
+    DEFAULT_PAIRS, aggregate_by_param, fetch_ohlcv, top_liquid_pairs,
+)
 
 
 def build_param_sets(grid: bool) -> list:
@@ -82,18 +84,10 @@ def main() -> None:
             )
 
     print("\n=== AGREGAT per parameter (semua pair) ===")
-    for label in sorted({r["params"] for r in all_results}):
-        rows = [r for r in all_results if r["params"] == label]
-        tw = sum(r["wins"] for r in rows)
-        tl = sum(r["losses"] for r in rows)
-        tot = tw + tl
-        wr = tw / tot * 100 if tot else 0
-        ret = sum(r["total_return_pct"] for r in rows)
-        pf_num = sum(r["avg_win_pct"] * r["wins"] for r in rows)
-        pf_den = abs(sum(r["avg_loss_pct"] * r["losses"] for r in rows))
-        pf = pf_num / pf_den if pf_den else 0
-        print(f"  {label:32s} trades={tot:4d} WR={wr:5.1f}% PF={pf:4.2f} "
-              f"sum_ret={ret:+9.2f}%  {'>=60% GATE OK' if wr >= 60 else 'belum lolos gate'}")
+    for agg in aggregate_by_param(all_results):
+        print(f"  {agg['label']:32s} trades={agg['trades']:4d} WR={agg['win_rate_pct']:5.1f}% "
+              f"PF={agg['profit_factor']:4.2f} sum_ret={agg['total_return_pct']:+9.2f}%  "
+              f"{'>=60% GATE OK' if agg['win_rate_pct'] >= 60 else 'belum lolos gate'}")
 
     if args.json:
         out = Path(__file__).resolve().parent.parent / "data" / "backtests"
