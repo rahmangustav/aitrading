@@ -6,7 +6,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from whale_tracker import analyze_large_trades, analyze_orderbook_imbalance
+from whale_tracker import (
+    analyze_large_trades,
+    analyze_orderbook_imbalance,
+    format_orderbook_output,
+)
 
 
 def _trade(price, qty, is_buyer_maker, time_ms):
@@ -88,3 +92,29 @@ class TestAnalyzeOrderbookImbalance:
         result = analyze_orderbook_imbalance(orderbook, depth=20)
         assert any(w["price"] == 99 for w in result["bid_walls"])
         assert result["ask_walls"] == []
+
+
+class TestFormatOrderbookOutput:
+    def _analysis(self):
+        return {
+            "total_bid_volume": 10.0,
+            "total_ask_volume": 5.0,
+            "total_bid_value": 1000.0,
+            "total_ask_value": 500.0,
+            "volume_ratio": 2.0,
+            "value_ratio": 2.0,
+            "bid_walls": [{"price": 99.0, "size": 30.0}],
+            "ask_walls": [{"price": 101.0, "size": 20.0}],
+            "imbalance": "BULLISH",
+        }
+
+    def test_zero_current_price_shows_na_instead_of_crashing(self, capsys):
+        format_orderbook_output(self._analysis(), current_price=0.0)
+        out = capsys.readouterr().out
+        assert "N/A" in out
+        assert "ZeroDivisionError" not in out
+
+    def test_normal_current_price_computes_wall_distance(self, capsys):
+        format_orderbook_output(self._analysis(), current_price=100.0)
+        out = capsys.readouterr().out
+        assert "1.00%" in out
