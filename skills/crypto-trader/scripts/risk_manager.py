@@ -256,6 +256,8 @@ class RiskManager:
         """Return True if stop-loss should trigger."""
         if not self._stop_loss_cfg.get("enabled", True):
             return False
+        if entry_price <= 0:
+            return False
         threshold = custom_pct if custom_pct is not None else self._stop_loss_cfg.get("default_pct", 5.0)
         loss_pct = ((entry_price - current_price) / entry_price) * 100
         return loss_pct >= threshold
@@ -289,6 +291,8 @@ class RiskManager:
     ) -> bool:
         """Return True if trailing stop should trigger."""
         if not self._stop_loss_cfg.get("trailing_enabled", False):
+            return False
+        if highest_price <= 0:
             return False
         threshold = custom_pct if custom_pct is not None else self._stop_loss_cfg.get("trailing_pct", 3.0)
         drop_pct = ((highest_price - current_price) / highest_price) * 100
@@ -330,6 +334,8 @@ class RiskManager:
         """Return True if take-profit should trigger."""
         if not self._take_profit_cfg.get("enabled", True):
             return False
+        if entry_price <= 0:
+            return False
         threshold = custom_pct if custom_pct is not None else self._take_profit_cfg.get("default_pct", 10.0)
         profit_pct = ((current_price - entry_price) / entry_price) * 100
         return profit_pct >= threshold
@@ -341,6 +347,8 @@ class RiskManager:
     ) -> Optional[float]:
         """Return the fraction to sell if partial take-profit triggers, else None."""
         if not self._take_profit_cfg.get("partial_exit_enabled", False):
+            return None
+        if entry_price <= 0:
             return None
         trigger_pct = self._take_profit_cfg.get("partial_exit_trigger_pct", 5.0)
         exit_fraction = self._take_profit_cfg.get("partial_exit_pct", 50.0) / 100.0
