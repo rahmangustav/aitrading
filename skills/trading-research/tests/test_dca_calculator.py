@@ -118,6 +118,44 @@ class TestSimulateDcaReturns:
         assert total_invested == 0
         assert total_units == 0
 
+    def test_zero_amount_purchases_do_not_crash_avg_price(self):
+        # total=0 via calculate_dca_schedule() produces amount=0 per purchase;
+        # every purchase buys 0 units, so total_units stays 0 throughout --
+        # avg_price used to divide by that 0 with a ZeroDivisionError.
+        schedule = [
+            {"date": "2026-01-01", "amount": 0.0},
+            {"date": "2026-01-08", "amount": 0.0},
+        ]
+        price_history = {"2026-01-01": 50.0, "2026-01-08": 60.0}
+        purchases, total_invested, total_units = simulate_dca_returns(
+            schedule, price_history
+        )
+        assert total_invested == pytest.approx(0.0)
+        assert total_units == pytest.approx(0.0)
+        assert [p["avg_price"] for p in purchases] == [0, 0]
+
+    def test_zero_or_negative_price_is_skipped_not_crashed(self):
+        # A 0 or negative price in price_history (bad/missing market data)
+        # used to hit `amount / price` and crash instead of being skipped
+        # like an unresolvable date already is.
+        schedule = [
+            {"date": "2026-01-01", "amount": 100.0},
+            {"date": "2026-01-08", "amount": 100.0},
+            {"date": "2026-01-15", "amount": 100.0},
+        ]
+        price_history = {
+            "2026-01-01": 0.0,
+            "2026-01-08": -5.0,
+            "2026-01-15": 50.0,
+        }
+        purchases, total_invested, total_units = simulate_dca_returns(
+            schedule, price_history
+        )
+        assert len(purchases) == 1
+        assert purchases[0]["date"] == "2026-01-15"
+        assert total_invested == pytest.approx(100.0)
+        assert total_units == pytest.approx(2.0)
+
 
 class TestCalculateLumpSumComparison:
     def test_positive_return_when_price_rises(self):

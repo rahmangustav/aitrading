@@ -80,20 +80,20 @@ def simulate_dca_returns(schedule, price_history):
                     price = price_history[d]
                     break
         
-        if price is None:
+        if price is None or price <= 0:
             continue
-        
+
         units = amount / price
         total_invested += amount
         total_units += units
-        
+
         purchases.append({
             'date': date,
             'price': price,
             'amount': amount,
             'units': units,
             'total_units': total_units,
-            'avg_price': total_invested / total_units
+            'avg_price': total_invested / total_units if total_units > 0 else 0
         })
     
     return purchases, total_invested, total_units
